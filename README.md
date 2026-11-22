@@ -57,7 +57,7 @@ The drawer is dark translucent glass (`backdrop-filter: blur(12px)`, with an opa
 
 **Motion trails**: switch on *Glowing wakes* and set the persistence. Instead of being cleared, each frame fades the previous ones toward the background, leaving bioluminescent wakes.
 
-Settings are saved in `localStorage` (debounced, and flushed when the page closes), so a home-screen app reopens as you left it. Pause is not saved. URL parameters override saved settings. *Reset all* restores the defaults.
+Settings are saved in `localStorage` (debounced, and flushed when the page closes), so a home-screen app reopens as you left it. Pause is not saved, and neither are live populations. With the life cycle on, each launch starts a fresh ecosystem scaled to the screen, so a crash at closing time can't carry over. Fixed populations (life cycle off) are saved. URL parameters override saved settings. *Reset all* restores the defaults.
 
 ## Configuration: `window.simConfig`
 
@@ -135,6 +135,7 @@ app.sim.on('predatorState', ({ id, from, to, time }) => { /* patrol â†’ pursue â
 app.sim.on('birth', ({ species, id, parent, generation, x, y }) => { /* a prey divided */ });
 app.sim.on('death', ({ species, cause, generation }) => { /* cause: 'eaten' | 'starved' */ });
 app.sim.on('predatorBirth', (e) => {}); app.sim.on('predatorDeath', (e) => {});
+app.sim.on('extinction', ({ kind, species }) => { /* a wanted population died out */ });
 app.sim.on('immigration', ({ kind, species, count }) => { /* extinction rescue */ });
 app.sim.addPulse(x, y);  // programmatic touch physics
 app.sim.setBeacon('ui', x, y, 'repel');  app.sim.releaseBeacon('ui');

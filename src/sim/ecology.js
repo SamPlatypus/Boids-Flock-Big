@@ -117,7 +117,7 @@ function updatePrey(sim, dt) {
   const W = sim.width;
   const H = sim.height;
   const basal = ECOLOGY.basalMetabolism;
-  const { vx, vy, x, y, energy, foodTarget, foodTargetId, species, dead } = prey;
+  let { vx, vy, x, y, energy, foodTarget, foodTargetId, species, dead } = prey;
   const n0 = prey.count;
 
   for (let i = 0; i < n0; i++) {
@@ -148,7 +148,11 @@ function updatePrey(sim, dt) {
     if (e >= ECOLOGY.divisionEnergy) {
       const count = prey.countBySpecies[s];
       const damping = 1 - count / P.capacity;
-      if (damping > 0 && count < sim.maxPopulation(s) && rng.next() < P.fertility * damping * dt) divide(sim, i);
+      if (damping > 0 && count < sim.maxPopulation(s) && rng.next() < P.fertility * damping * dt) {
+        divide(sim, i);
+        // A birth can outgrow the pool, which reallocates its arrays.
+        ({ vx, vy, x, y, energy, foodTarget, foodTargetId, species, dead } = prey);
+      }
     }
   }
 

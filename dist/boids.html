@@ -5395,7 +5395,7 @@ function updatePrey(sim, dt) {
   const W = sim.width;
   const H = sim.height;
   const basal = ECOLOGY.basalMetabolism;
-  const { vx, vy, x, y, energy, foodTarget, foodTargetId, species, dead } = prey;
+  let { vx, vy, x, y, energy, foodTarget, foodTargetId, species, dead } = prey;
   const n0 = prey.count;
 
   for (let i = 0; i < n0; i++) {
@@ -5426,7 +5426,11 @@ function updatePrey(sim, dt) {
     if (e >= ECOLOGY.divisionEnergy) {
       const count = prey.countBySpecies[s];
       const damping = 1 - count / P.capacity;
-      if (damping > 0 && count < sim.maxPopulation(s) && rng.next() < P.fertility * damping * dt) divide(sim, i);
+      if (damping > 0 && count < sim.maxPopulation(s) && rng.next() < P.fertility * damping * dt) {
+        divide(sim, i);
+        // A birth can outgrow the pool, which reallocates its arrays.
+        ({ vx, vy, x, y, energy, foodTarget, foodTargetId, species, dead } = prey);
+      }
     }
   }
 
@@ -5726,6 +5730,8 @@ const { PopulationHistory } = __module19;
  * @property {{ id: number, parent: number, x: number, y: number, time: number }} predatorBirth
  * @property {{ id: number, cause: 'starved', x: number, y: number, time: number }} predatorDeath
  * @property {{ kind: 'prey' | 'predator', species: number, count: number, time: number }} immigration
+ * @property {{ kind: 'prey' | 'predator', species: number, time: number }} extinction A population the
+ *   user still wants died out (not emitted when the user removes it); species is −1 for predators.
  */
 
 /** @typedef {'catch' | 'birth' | 'starve' | 'predatorBirth' | 'predatorStarve'} EffectKind */
@@ -6111,11 +6117,15 @@ class Simulation {
       if (live !== this.syncedCounts[s]) {
         this.syncedCounts[s] = live;
         config[this.species[s].countKey] = live;
+        if (live === 0 && this.wanted[s]) this.events.emit('extinction', { kind: 'prey', species: s, time: this.time });
       }
     }
     if (this.predators.length !== this.syncedPredators) {
       this.syncedPredators = this.predators.length;
       config.predatorCount = this.predators.length;
+      if (this.predators.length === 0 && this.wantedPredators) {
+        this.events.emit('extinction', { kind: 'predator', species: -1, time: this.time });
+      }
     }
   }
 
@@ -6768,7 +6778,7 @@ return { createFlockingApp };
 })();
 // ── src/persist.js ────────────────────────────────────────────────────
 const __module24 = (() => {
-const { CONFIG_KEYS } = __module2;
+const { CONFIG_KEYS, COUNT_KEYS } = __module2;
 /**
  * Settings persistence in localStorage, so a home-screen PWA reopens with the
  * user's palette and tuning. Writes are debounced, and every storage access
@@ -6785,6 +6795,14 @@ const { CONFIG_KEYS } = __module2;
 const STORAGE_KEY = 'boids:settings:v1';
 /** Not restored on the next launch. */
 const VOLATILE = new Set(['paused']);
+/**
+ * With the life cycle on, populations are live simulation state that the
+ * simulation writes back every step, not settings: saving them would restore
+ * a crash (e.g. 0 predators, which reads as "the user removed predators" and
+ * disables the extinction rescue). Each launch starts a fresh ecosystem
+ * instead. With fixed populations they are the user's choice and are saved.
+ */
+const LIVE_WITH_ECOSYSTEM = new Set([...COUNT_KEYS, 'predatorCount']);
 
 /**
  * Previously saved settings (unknown keys dropped), or an empty object.
@@ -6795,10 +6813,13 @@ function loadSettings() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return {};
+    const ecosystem = data.ecosystem !== false; // absent means the default (on)
     /** @type {Partial<Record<ConfigKey, unknown>>} */
     const settings = {};
     for (const key of CONFIG_KEYS) {
-      if (!VOLATILE.has(key) && data && Object.prototype.hasOwnProperty.call(data, key)) settings[key] = data[key];
+      if (VOLATILE.has(key) || (ecosystem && LIVE_WITH_ECOSYSTEM.has(key))) continue;
+      if (Object.prototype.hasOwnProperty.call(data, key)) settings[key] = data[key];
     }
     return settings;
   } catch {
@@ -6818,6 +6839,7 @@ function persistSettings(config, delay = 500) {
   const save = () => {
     const snapshot = /** @type {Record<string, unknown>} */ (config.$snapshot());
     for (const key of VOLATILE) delete snapshot[key];
+    if (snapshot.ecosystem) for (const key of LIVE_WITH_ECOSYSTEM) delete snapshot[key];
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
     } catch {
@@ -6825,7 +6847,7 @@ function persistSettings(config, delay = 500) {
     }
   };
   const unsubscribe = config.$subscribe((key) => {
-    if (VOLATILE.has(key)) return;
+    if (VOLATILE.has(key) || (config.ecosystem && LIVE_WITH_ECOSYSTEM.has(key))) return;
     clearTimeout(timer);
     timer = setTimeout(save, delay);
   });
@@ -6837,11 +6859,22 @@ function persistSettings(config, delay = 500) {
     }
   };
   // Persist pending changes when the page is hidden or closed (browser only).
-  const canListen = typeof globalThis.addEventListener === 'function';
-  if (canListen) globalThis.addEventListener('pagehide', flush);
+  // Mobile browsers may kill a backgrounded app without `pagehide`;
+  // `visibilitychange` to hidden is the last reliable moment.
+  const onVisibility = () => {
+    if (document.visibilityState === 'hidden') flush();
+  };
+  const canListen = typeof globalThis.addEventListener === 'function' && typeof document !== 'undefined';
+  if (canListen) {
+    globalThis.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+  }
   return () => {
     unsubscribe();
-    if (canListen) globalThis.removeEventListener('pagehide', flush);
+    if (canListen) {
+      globalThis.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    }
     clearTimeout(timer);
   };
 }
@@ -7510,6 +7543,17 @@ const TABS = /** @type {const} */ ([
 ]);
 
 const SPECIES_LABELS = ['Dartfish', 'Mantas', 'Foragers'];
+/** Config keys the simulation rewrites with live populations. */
+const POPULATION_KEYS = new Set(['countSpecies1', 'countSpecies2', 'countSpecies3', 'predatorCount']);
+
+/**
+ * Write text only when it changed (avoids needless DOM mutations).
+ * @param {HTMLElement} element
+ * @param {string} text
+ */
+function setText(element, text) {
+  if (element.textContent !== text) element.textContent = text;
+}
 const COLOR_FOR_SPECIES = /** @type {const} */ (['colorSpecies1', 'colorSpecies2', 'colorSpecies3']);
 const TAB_STORAGE_KEY = 'boids:ui:tab';
 const HINT_STORAGE_KEY = 'boids:ui:hint-seen';
@@ -7842,6 +7886,7 @@ function createHud(app) {
     drawer.setAttribute('aria-hidden', String(!value));
     drawer.inert = !value;
     if (value) {
+      update();
       refreshMetrics(true);
       closeButton.focus({ preventScroll: true });
     } else if (root.contains(document.activeElement)) {
@@ -7919,13 +7964,9 @@ function createHud(app) {
     }),
   );
   cleanups.push(
-    config.$subscribe((key, value, previous) => {
-      const s = COLOR_FOR_SPECIES.findIndex((_, i) => key === `countSpecies${i + 1}`);
-      if (s >= 0 && value === 0 && previous > 0 && config.ecosystem && sim.wanted[s]) {
-        toast(`${SPECIES_LABELS[s]} died out. Migrants will return.`);
-      } else if (key === 'predatorCount' && value === 0 && previous > 0 && config.ecosystem && sim.wantedPredators) {
-        toast('The last predator starved');
-      }
+    // Only die-offs: removing a population yourself is not news.
+    sim.on('extinction', (e) => {
+      toast(e.kind === 'predator' ? 'The last predator starved' : `${SPECIES_LABELS[e.species]} died out. Migrants will return.`);
     }),
   );
 
@@ -7943,11 +7984,16 @@ function createHud(app) {
       row.energy.style.color = color;
     });
   }
+  /** @type {boolean | null} */
+  let shownPaused = null;
   function reflectState() {
     const paused = config.paused;
-    pauseIcon.replaceChildren(icon(paused ? ICONS.play : ICONS.pause));
-    pauseButton.setAttribute('aria-label', paused ? 'Resume simulation' : 'Pause simulation');
-    pauseAction.textContent = paused ? 'Resume' : 'Pause';
+    if (paused !== shownPaused) {
+      shownPaused = paused;
+      pauseIcon.replaceChildren(icon(paused ? ICONS.play : ICONS.pause));
+      pauseButton.setAttribute('aria-label', paused ? 'Resume simulation' : 'Pause simulation');
+      pauseAction.textContent = paused ? 'Resume' : 'Pause';
+    }
     const scenario = activeScenario(config);
     for (const [id, button] of Object.entries(scenarioButtons)) button.setAttribute('aria-pressed', String(id === scenario));
     const palette = activePalette(config);
@@ -7963,7 +8009,8 @@ function createHud(app) {
   cleanups.push(
     config.$subscribe((key) => {
       if (key.startsWith('color')) applyTheme();
-      reflectState();
+      // Live population counts change several times a second and affect none of this.
+      if (!POPULATION_KEYS.has(key)) reflectState();
     }),
   );
 
@@ -7992,13 +8039,16 @@ function createHud(app) {
   }
 
   function update() {
-    const fps = app.stats?.snapshot.fps ?? 0;
-    fpsValue.textContent = fps > 0 ? String(Math.round(fps)) : '–';
-    fpsDot.dataset.level = fps === 0 || fps >= 50 ? 'ok' : fps >= 30 ? 'warn' : 'bad';
-    boidsValue.textContent = String(sim.prey.count);
-    predValue.textContent = String(sim.predators.length);
-    pillStatus.textContent = `${sim.prey.count} boids, ${sim.predators.length} predators, ${Math.round(fps)} frames per second`;
-    subtitle.textContent = `${Math.round(fps)} fps · ${sim.prey.count} boids · ${sim.predators.length} predators · ${sim.food.count} food`;
+    const fps = Math.round(app.stats?.snapshot.fps ?? 0);
+    const boids = sim.prey.count;
+    const predators = sim.predators.length;
+    setText(fpsValue, fps > 0 ? String(fps) : '–');
+    const level = fps === 0 || fps >= 50 ? 'ok' : fps >= 30 ? 'warn' : 'bad';
+    if (fpsDot.dataset.level !== level) fpsDot.dataset.level = level;
+    setText(boidsValue, String(boids));
+    setText(predValue, String(predators));
+    setText(pillStatus, `${boids} boids, ${predators} predators, ${fps} frames per second`);
+    if (open) setText(subtitle, `${fps} fps · ${boids} boids · ${predators} predators · ${sim.food.count} food`);
     refreshMetrics();
   }
   const interval = setInterval(update, 250);

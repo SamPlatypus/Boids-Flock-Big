@@ -82,6 +82,23 @@ test('settings persist (debounced), skip volatile keys and tolerate bad storage'
     assert.equal(loaded.colorFood, '#00ff00');
     assert.equal('paused' in loaded, false, 'paused is never restored');
 
+    // Live populations are not settings while the life cycle runs…
+    assert.equal('countSpecies1' in loaded, false, 'live population not restored');
+    assert.equal('predatorCount' in loaded, false, 'a crash to 0 predators must not disable the rescue');
+    // …but fixed populations (life cycle off) are the user's choice.
+    const fixed = createConfig({}, { warn: () => {} });
+    const stopFixed = persistSettings(fixed, 10);
+    fixed.$set({ ecosystem: false, countSpecies1: 77, predatorCount: 0 });
+    await new Promise((r) => setTimeout(r, 40));
+    stopFixed();
+    assert.deepEqual(
+      [loadSettings().ecosystem, loadSettings().countSpecies1, loadSettings().predatorCount],
+      [false, 77, 0],
+    );
+    // Counts stored with the life cycle on (by an older build) are ignored.
+    store.set('boids:settings:v1', JSON.stringify({ ecosystem: true, predatorCount: 0, countSpecies2: 3, trails: 0.5 }));
+    assert.deepEqual(loadSettings(), { ecosystem: true, trails: 0.5 });
+
     store.set('boids:settings:v1', '{not json');
     assert.deepEqual(loadSettings(), {});
     g.localStorage = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };

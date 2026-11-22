@@ -57,6 +57,8 @@ import { PopulationHistory } from './history.js';
  * @property {{ id: number, parent: number, x: number, y: number, time: number }} predatorBirth
  * @property {{ id: number, cause: 'starved', x: number, y: number, time: number }} predatorDeath
  * @property {{ kind: 'prey' | 'predator', species: number, count: number, time: number }} immigration
+ * @property {{ kind: 'prey' | 'predator', species: number, time: number }} extinction A population the
+ *   user still wants died out (not emitted when the user removes it); species is −1 for predators.
  */
 
 /** @typedef {'catch' | 'birth' | 'starve' | 'predatorBirth' | 'predatorStarve'} EffectKind */
@@ -442,11 +444,15 @@ export class Simulation {
       if (live !== this.syncedCounts[s]) {
         this.syncedCounts[s] = live;
         config[this.species[s].countKey] = live;
+        if (live === 0 && this.wanted[s]) this.events.emit('extinction', { kind: 'prey', species: s, time: this.time });
       }
     }
     if (this.predators.length !== this.syncedPredators) {
       this.syncedPredators = this.predators.length;
       config.predatorCount = this.predators.length;
+      if (this.predators.length === 0 && this.wantedPredators) {
+        this.events.emit('extinction', { kind: 'predator', species: -1, time: this.time });
+      }
     }
   }
 

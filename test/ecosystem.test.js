@@ -245,6 +245,43 @@ test('food blooms in clusters, drifts smoothly and respects the cap', () => {
   assert.ok(sum / food.count < 0.7 * uniform, `clustering: ${(sum / food.count).toFixed(1)} vs ${uniform.toFixed(1)}`);
 });
 
+test('a birth that outgrows the prey pool keeps every energy update', () => {
+  const { sim } = makeSim({ carryingCapacity: 2000 });
+  const prey = sim.prey;
+  sim.addPrey(DART, prey.capacity - prey.count); // exactly full: the first birth reallocates
+  const n = prey.count;
+  assert.equal(n, prey.capacity);
+  sim.species[DART].fertility = 1e9; // everyone divides this step…
+  sim.species[DART].capacityShare = 1; // …with room for all the daughters
+  for (let i = 0; i < n; i++) prey.energy[i] = 1;
+  sim.step(dt);
+  assert.equal(prey.count, 2 * n, 'every agent divided');
+  for (let i = 0; i < prey.count; i++) {
+    // Metabolism was paid before the split: exactly 0.5 would mean a lost write.
+    assert.ok(prey.energy[i] < 0.5 && prey.energy[i] > 0.49, `agent ${i}: ${prey.energy[i]}`);
+  }
+});
+
+test('extinction events report die-offs, not populations the user removed', () => {
+  const { sim, config } = makeSim({ countSpecies2: 5, countSpecies3: 5, predatorCount: 2 });
+  /** @type {string[]} */
+  const events = [];
+  sim.on('extinction', (e) => events.push(`${e.kind}:${e.species}`));
+  // The user removes foragers and one predator: no event.
+  config.$set({ countSpecies3: 0, predatorCount: 1 });
+  sim.step(dt);
+  assert.deepEqual(events, []);
+  // Mantas and the last predator starve: one event each.
+  for (let i = 0; i < sim.prey.count; i++) if (sim.prey.species[i] === MANTA) sim.prey.energy[i] = 1e-9;
+  for (const p of sim.predators) p.energy = 1e-9;
+  sim.step(dt);
+  assert.deepEqual(events.sort(), ['predator:-1', `prey:${MANTA}`]);
+  // Removing a population that is already gone stays quiet too.
+  config.$set({ countSpecies2: 0, predatorCount: 0 });
+  sim.step(dt);
+  assert.equal(events.length, 2);
+});
+
 test('turning the life cycle off fades the remaining food out', () => {
   const { sim, config } = makeSim({ foodSpawnRate: 20 }, 3, 412, 839);
   for (let k = 0; k < 60 * 8; k++) sim.step(dt);

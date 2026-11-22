@@ -42,6 +42,17 @@ const TABS = /** @type {const} */ ([
 ]);
 
 const SPECIES_LABELS = ['Dartfish', 'Mantas', 'Foragers'];
+/** Config keys the simulation rewrites with live populations. */
+const POPULATION_KEYS = new Set(['countSpecies1', 'countSpecies2', 'countSpecies3', 'predatorCount']);
+
+/**
+ * Write text only when it changed (avoids needless DOM mutations).
+ * @param {HTMLElement} element
+ * @param {string} text
+ */
+function setText(element, text) {
+  if (element.textContent !== text) element.textContent = text;
+}
 const COLOR_FOR_SPECIES = /** @type {const} */ (['colorSpecies1', 'colorSpecies2', 'colorSpecies3']);
 const TAB_STORAGE_KEY = 'boids:ui:tab';
 const HINT_STORAGE_KEY = 'boids:ui:hint-seen';
@@ -374,6 +385,7 @@ export function createHud(app) {
     drawer.setAttribute('aria-hidden', String(!value));
     drawer.inert = !value;
     if (value) {
+      update();
       refreshMetrics(true);
       closeButton.focus({ preventScroll: true });
     } else if (root.contains(document.activeElement)) {
@@ -451,13 +463,9 @@ export function createHud(app) {
     }),
   );
   cleanups.push(
-    config.$subscribe((key, value, previous) => {
-      const s = COLOR_FOR_SPECIES.findIndex((_, i) => key === `countSpecies${i + 1}`);
-      if (s >= 0 && value === 0 && previous > 0 && config.ecosystem && sim.wanted[s]) {
-        toast(`${SPECIES_LABELS[s]} died out. Migrants will return.`);
-      } else if (key === 'predatorCount' && value === 0 && previous > 0 && config.ecosystem && sim.wantedPredators) {
-        toast('The last predator starved');
-      }
+    // Only die-offs: removing a population yourself is not news.
+    sim.on('extinction', (e) => {
+      toast(e.kind === 'predator' ? 'The last predator starved' : `${SPECIES_LABELS[e.species]} died out. Migrants will return.`);
     }),
   );
 
@@ -475,11 +483,16 @@ export function createHud(app) {
       row.energy.style.color = color;
     });
   }
+  /** @type {boolean | null} */
+  let shownPaused = null;
   function reflectState() {
     const paused = config.paused;
-    pauseIcon.replaceChildren(icon(paused ? ICONS.play : ICONS.pause));
-    pauseButton.setAttribute('aria-label', paused ? 'Resume simulation' : 'Pause simulation');
-    pauseAction.textContent = paused ? 'Resume' : 'Pause';
+    if (paused !== shownPaused) {
+      shownPaused = paused;
+      pauseIcon.replaceChildren(icon(paused ? ICONS.play : ICONS.pause));
+      pauseButton.setAttribute('aria-label', paused ? 'Resume simulation' : 'Pause simulation');
+      pauseAction.textContent = paused ? 'Resume' : 'Pause';
+    }
     const scenario = activeScenario(config);
     for (const [id, button] of Object.entries(scenarioButtons)) button.setAttribute('aria-pressed', String(id === scenario));
     const palette = activePalette(config);
@@ -495,7 +508,8 @@ export function createHud(app) {
   cleanups.push(
     config.$subscribe((key) => {
       if (key.startsWith('color')) applyTheme();
-      reflectState();
+      // Live population counts change several times a second and affect none of this.
+      if (!POPULATION_KEYS.has(key)) reflectState();
     }),
   );
 
@@ -524,13 +538,16 @@ export function createHud(app) {
   }
 
   function update() {
-    const fps = app.stats?.snapshot.fps ?? 0;
-    fpsValue.textContent = fps > 0 ? String(Math.round(fps)) : '–';
-    fpsDot.dataset.level = fps === 0 || fps >= 50 ? 'ok' : fps >= 30 ? 'warn' : 'bad';
-    boidsValue.textContent = String(sim.prey.count);
-    predValue.textContent = String(sim.predators.length);
-    pillStatus.textContent = `${sim.prey.count} boids, ${sim.predators.length} predators, ${Math.round(fps)} frames per second`;
-    subtitle.textContent = `${Math.round(fps)} fps · ${sim.prey.count} boids · ${sim.predators.length} predators · ${sim.food.count} food`;
+    const fps = Math.round(app.stats?.snapshot.fps ?? 0);
+    const boids = sim.prey.count;
+    const predators = sim.predators.length;
+    setText(fpsValue, fps > 0 ? String(fps) : '–');
+    const level = fps === 0 || fps >= 50 ? 'ok' : fps >= 30 ? 'warn' : 'bad';
+    if (fpsDot.dataset.level !== level) fpsDot.dataset.level = level;
+    setText(boidsValue, String(boids));
+    setText(predValue, String(predators));
+    setText(pillStatus, `${boids} boids, ${predators} predators, ${fps} frames per second`);
+    if (open) setText(subtitle, `${fps} fps · ${boids} boids · ${predators} predators · ${sim.food.count} food`);
     refreshMetrics();
   }
   const interval = setInterval(update, 250);
