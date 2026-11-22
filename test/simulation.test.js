@@ -102,8 +102,8 @@ test('the same seed and inputs reproduce a run exactly', () => {
   assert.deepEqual(a.predators.map((p) => [p.x, p.y, p.state]), b.predators.map((p) => [p.x, p.y, p.state]));
 });
 
-test('populations follow the config, and removal keeps the pool consistent', () => {
-  const sim = makeSim();
+test('fixed populations follow the config, and removal keeps the pool consistent', () => {
+  const sim = makeSim({ ecosystem: false });
   assert.deepEqual(Array.from(sim.prey.countBySpecies), [160, 40, 100]);
   sim.config.$set({ countSpecies1: 10, countSpecies2: 75, countSpecies3: 0, predatorCount: 5 });
   sim.step(dt);

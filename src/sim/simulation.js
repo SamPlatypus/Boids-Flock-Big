@@ -4,17 +4,25 @@
  * DOM-free by design. It runs unchanged in the browser, in Node (tests,
  * benchmarks) or in a Web Worker. Rendering and input talk to it through its
  * public API: `step`, `resize`, `reset`, `addPulse`, `setBeacon`,
- * `releaseBeacon`, `on`, plus read access to `prey`, `predators`, `pulses`,
- * `beacons`, `effects` and `stats`.
+ * `releaseBeacon`, `on`, `speciesSummary`, plus read access to `prey`,
+ * `predators`, `food`, `pulses`, `beacons`, `effects`, `history` and `stats`.
  *
  * One step (Jacobi-style: every agent reads the same consistent snapshot):
  *   1. resolve species/predator parameters from config; sync populations
- *   2. rebuild the spatial hash (counting sort, O(N))
+ *   2. rebuild the spatial hash (counting sort, O(N)); update food (drift, blooms)
  *   3. interactions: beacon smoothing, pulse fronts → prey stimuli
  *   4. predators sense: threats → prey stimuli; score hunting targets
- *   5. prey steering (flocking + panic + prioritized allocation)
+ *   5. prey steering (flocking + grazing + panic + prioritized allocation)
  *   6. predator state machine + steering
- *   7. integrate prey, then predators (+ catches)
+ *   7. integrate prey, then predators (+ catches on contact)
+ *   8. life cycle: metabolism, grazing, division, starvation, immigration
+ *   9. publish live population counts back to the config; record history
+ *
+ * Populations: `config.countSpecies*` / `predatorCount` always mirror the live
+ * population. A change from outside (UI, preset, console) is applied
+ * immediately by adding or removing individuals. With the life cycle on,
+ * births and deaths are written back so every observer sees the live numbers.
+ * With it off, the configured counts are enforced (catches respawn prey).
  *
  * @module sim/simulation
  */
@@ -24,11 +32,15 @@ import { Emitter } from '../core/emitter.js';
 import { clamp } from '../core/math.js';
 import { NeighborBuffer, ToroidalSpatialHash } from '../core/spatial-hash.js';
 import { torusDistanceSq, wrapCoord } from '../core/torus.js';
+import { CONFIG_SCHEMA } from '../config.js';
 import { PREDATOR_PROFILE, SPECIES, SPECIES_COUNT, SpeciesRuntime } from './species.js';
 import { PreyPool } from './prey-pool.js';
 import { Predator, PredatorRuntime, integratePredators, sensePredators, steerPredators } from './predator.js';
 import { Beacon, PULSE, Pulse, applyInteractionForces, updateInteractions } from './interactions.js';
 import { computePreySteering, integratePrey } from './flocking.js';
+import { FOOD, FoodField } from './food.js';
+import { ECOLOGY, areaFactor, removeDeadPrey, updateLifecycle } from './ecology.js';
+import { PopulationHistory } from './history.js';
 
 /** @typedef {import('../config.js').SimConfig} SimConfig */
 /** @typedef {import('./interactions.js').BeaconMode} BeaconMode */
@@ -40,9 +52,25 @@ import { computePreySteering, integratePrey } from './flocking.js';
  * @typedef {object} SimEvents
  * @property {{ predator: number, prey: number, species: number, x: number, y: number, time: number }} catch
  * @property {{ id: number, from: PredatorState, to: PredatorState, time: number }} predatorState
+ * @property {{ species: number, id: number, parent: number, generation: number, x: number, y: number, time: number }} birth
+ * @property {{ species: number, cause: 'eaten' | 'starved', id: number, x: number, y: number, generation: number, time: number }} death
+ * @property {{ id: number, parent: number, x: number, y: number, time: number }} predatorBirth
+ * @property {{ id: number, cause: 'starved', x: number, y: number, time: number }} predatorDeath
+ * @property {{ kind: 'prey' | 'predator', species: number, count: number, time: number }} immigration
  */
 
-/** @typedef {{ x: number, y: number, age: number, duration: number }} CatchEffect */
+/** @typedef {'catch' | 'birth' | 'starve' | 'predatorBirth' | 'predatorStarve'} EffectKind */
+
+/**
+ * Short-lived visual marker (render only).
+ * @typedef {object} Effect
+ * @property {EffectKind} kind
+ * @property {number} x
+ * @property {number} y
+ * @property {number} age
+ * @property {number} duration
+ * @property {number} species Prey species, or -1 for predators.
+ */
 
 /** Fixed physics step (s). */
 export const FIXED_DT = 1 / 60;
@@ -56,12 +84,14 @@ export const MAX_NEIGHBORS = 16;
 const CELL_FRACTION = 0.5;
 const MIN_CELL_SIZE = 12;
 const MAX_CELL_SIZE = 160;
-const CATCH_EFFECT_DURATION = 0.6;
+/** Effect durations (s); the list is capped so mass die-offs stay cheap. */
+const EFFECT_DURATION = Object.freeze({ catch: 0.6, birth: 0.45, starve: 0.9, predatorBirth: 0.8, predatorStarve: 1.4 });
+const EFFECT_LIMIT = 160;
 
 export class Simulation {
   /**
    * @param {object} options
-   * @param {SimConfig} options.config Live config (read every step).
+   * @param {SimConfig} options.config Live config (read every step; population counts are written back).
    * @param {number} options.width World width (px).
    * @param {number} options.height World height (px).
    * @param {number} [options.seed] PRNG seed; the same seed and inputs reproduce a run exactly.
@@ -84,6 +114,9 @@ export class Simulation {
     /** @type {Predator[]} */
     this.predators = [];
     this.nextPredatorId = 1;
+    this.food = new FoodField();
+    /** Ten minutes of population samples (one every 2 s): spans a full predator–prey cycle. */
+    this.history = new PopulationHistory(300, 2);
     this.grid = new ToroidalSpatialHash();
     this.neighborBuffer = new NeighborBuffer(MAX_NEIGHBORS);
     /** Untruncated results for predator / interaction queries (grown with the pool). */
@@ -93,16 +126,36 @@ export class Simulation {
     /** @type {Map<number | string, Beacon>} */
     this.beacons = new Map();
     this.fadingBeaconSerial = 0;
-    /** @type {CatchEffect[]} */
+    /** @type {Effect[]} */
     this.effects = [];
     /** @type {Emitter<SimEvents>} */
     this.events = new Emitter();
-    this.stats = { pairChecks: 0, catches: 0 };
+    this.stats = {
+      pairChecks: 0,
+      catches: 0,
+      births: 0,
+      starvations: 0,
+      grazed: 0,
+      predatorBirths: 0,
+      predatorStarvations: 0,
+      immigrations: 0,
+      maxGeneration: 0,
+    };
+    /** Population counts last synced with the config (detects outside changes). */
+    this.syncedCounts = new Int32Array(SPECIES_COUNT);
+    this.syncedPredators = 0;
+    /** Whether the user wants each species / predators present (drives immigration). */
+    this.wanted = new Array(SPECIES_COUNT).fill(true);
+    this.wantedPredators = true;
+    /** Seconds each wanted species has been extinct. */
+    this.extinctTime = new Float64Array(SPECIES_COUNT);
+    this.predatorExtinctTime = 0;
+    this.historySample = [0, 0, 0, 0, 0];
     this.reset(this.seed);
   }
 
   /**
-   * Subscribe to 'catch' or 'predatorState'.
+   * Subscribe to a simulation event ('catch', 'birth', 'death', …).
    * @template {keyof SimEvents} K
    * @param {K} type
    * @param {(payload: SimEvents[K]) => void} listener
@@ -113,7 +166,7 @@ export class Simulation {
   }
 
   /**
-   * Respawn every agent from the configured populations.
+   * Respawn every agent from the configured populations and re-seed food.
    * @param {number} [seed]
    */
   reset(seed = this.seed) {
@@ -123,15 +176,33 @@ export class Simulation {
     this.stepCount = 0;
     this.prey.clear();
     this.predators.length = 0;
+    this.food.clear();
+    this.history.clear();
     this.pulses.length = 0;
     this.beacons.clear();
     this.effects.length = 0;
-    this.stats.catches = 0;
+    for (const key of /** @type {(keyof Simulation['stats'])[]} */ (Object.keys(this.stats))) this.stats[key] = 0;
     this.resolveRuntime(FIXED_DT);
     for (let s = 0; s < SPECIES_COUNT; s++) {
-      this.spawnSchools(s, this.config[this.species[s].countKey], true);
+      const count = this.config[this.species[s].countKey];
+      this.spawnSchools(s, count, true);
+      this.syncedCounts[s] = count;
+      this.wanted[s] = count > 0;
+      this.extinctTime[s] = 0;
+    }
+    const prey = this.prey;
+    for (let i = 0; i < prey.count; i++) {
+      prey.energy[i] = this.rng.range(0.45, 0.9);
+      prey.geneSpeed[i] = clamp(1 + 0.03 * this.rng.gaussian(), ECOLOGY.geneMin, ECOLOGY.geneMax);
+      prey.genePerception[i] = clamp(1 + 0.03 * this.rng.gaussian(), ECOLOGY.geneMin, ECOLOGY.geneMax);
     }
     for (let k = 0; k < this.config.predatorCount; k++) this.spawnPredator();
+    this.syncedPredators = this.config.predatorCount;
+    this.wantedPredators = this.syncedPredators > 0;
+    this.predatorExtinctTime = 0;
+    this.food.maxParticles = Math.round(FOOD.maxParticles * areaFactor(this.width, this.height));
+    if (this.config.ecosystem) this.food.seed(this, Math.round(this.food.maxParticles * 0.6));
+    this.recordHistory();
   }
 
   /**
@@ -159,6 +230,7 @@ export class Simulation {
       p.prevX = wrapCoord(p.prevX * sx, width);
       p.prevY = wrapCoord(p.prevY * sy, height);
     }
+    this.food.rescale(sx, sy, width, height);
     for (const pulse of this.pulses) {
       pulse.x = wrapCoord(pulse.x * sx, width);
       pulse.y = wrapCoord(pulse.y * sy, height);
@@ -182,6 +254,7 @@ export class Simulation {
    * @param {number} [dt]
    */
   step(dt = FIXED_DT) {
+    const ecosystem = this.config.ecosystem;
     this.resolveRuntime(dt);
     this.syncPopulations();
 
@@ -203,6 +276,8 @@ export class Simulation {
     this.grid.configure(this.width, this.height, this.cellSize());
     this.grid.build(prey.x, prey.y, n);
     this.grid.candidatesChecked = 0;
+    this.food.maxParticles = Math.round(FOOD.maxParticles * areaFactor(this.width, this.height));
+    this.food.update(this, dt, ecosystem);
 
     updateInteractions(this, dt);
     applyInteractionForces(this);
@@ -211,11 +286,15 @@ export class Simulation {
     steerPredators(this, dt);
     integratePrey(this, dt);
     integratePredators(this, dt);
+    if (ecosystem) updateLifecycle(this, dt);
+    else removeDeadPrey(this);
+    this.publishPopulations();
 
     for (const effect of this.effects) effect.age += dt;
     for (let i = this.effects.length - 1; i >= 0; i--) {
       if (this.effects[i].age >= this.effects[i].duration) this.effects.splice(i, 1);
     }
+    if (this.history.tick(dt)) this.recordHistory();
 
     this.stats.pairChecks = this.grid.candidatesChecked;
     this.time += dt;
@@ -272,7 +351,31 @@ export class Simulation {
     if (beacon) beacon.released = true;
   }
 
-  // ── Internals (also used by the predator module) ───────────────────────────
+  /**
+   * Per-species population summary (for metrics UIs). O(N); call sparingly.
+   * @returns {{ count: number, energy: number, speedGene: number, perceptionGene: number, generation: number }[]}
+   */
+  speciesSummary() {
+    const out = this.species.map(() => ({ count: 0, energy: 0, speedGene: 0, perceptionGene: 0, generation: 0 }));
+    const prey = this.prey;
+    for (let i = 0; i < prey.count; i++) {
+      const o = out[prey.species[i]];
+      o.count++;
+      o.energy += prey.energy[i];
+      o.speedGene += prey.geneSpeed[i];
+      o.perceptionGene += prey.genePerception[i];
+      if (prey.generation[i] > o.generation) o.generation = prey.generation[i];
+    }
+    for (const o of out) {
+      if (o.count === 0) continue;
+      o.energy /= o.count;
+      o.speedGene /= o.count;
+      o.perceptionGene /= o.count;
+    }
+    return out;
+  }
+
+  // ── Internals (also used by the predator and ecology modules) ─────────────
 
   /** @param {number} dt */
   resolveRuntime(dt) {
@@ -292,18 +395,75 @@ export class Simulation {
     return clamp(Number.isFinite(size) ? size * CELL_FRACTION : 64, MIN_CELL_SIZE, MAX_CELL_SIZE);
   }
 
-  /** Add or remove agents so the populations match the config. */
+  /** @param {number} s */
+  maxPopulation(s) {
+    return /** @type {number} */ (CONFIG_SCHEMA[this.species[s].countKey].max);
+  }
+
+  /** Most predators the life cycle will breed: scales with the world area. */
+  maxPredators() {
+    const schemaMax = /** @type {number} */ (CONFIG_SCHEMA.predatorCount.max);
+    return Math.min(schemaMax, Math.round(ECOLOGY.predatorsPerScreen * areaFactor(this.width, this.height)));
+  }
+
+  /**
+   * Apply population changes made from outside (UI, presets, console). With
+   * the life cycle off, also enforce the configured counts.
+   */
   syncPopulations() {
-    const prey = this.prey;
+    const config = this.config;
     for (let s = 0; s < SPECIES_COUNT; s++) {
-      const want = this.config[this.species[s].countKey];
-      const have = prey.countBySpecies[s];
-      if (want > have) this.addPrey(s, want - have);
-      else if (want < have) this.removePrey(s, have - want);
+      const want = config[this.species[s].countKey];
+      if (want !== this.syncedCounts[s]) {
+        this.syncedCounts[s] = want;
+        this.wanted[s] = want > 0;
+        this.extinctTime[s] = 0;
+        this.adjustPrey(s, want);
+      } else if (!config.ecosystem && this.prey.countBySpecies[s] !== want) {
+        this.adjustPrey(s, want);
+      }
     }
-    const wantPredators = this.config.predatorCount;
-    while (this.predators.length < wantPredators) this.spawnPredator();
-    if (this.predators.length > wantPredators) this.predators.length = wantPredators;
+    const wantPredators = config.predatorCount;
+    if (wantPredators !== this.syncedPredators) {
+      this.syncedPredators = wantPredators;
+      this.wantedPredators = wantPredators > 0;
+      this.predatorExtinctTime = 0;
+      this.adjustPredators(wantPredators);
+    } else if (!config.ecosystem && this.predators.length !== wantPredators) {
+      this.adjustPredators(wantPredators);
+    }
+  }
+
+  /** Write live counts (after births and deaths) back to the config. */
+  publishPopulations() {
+    const config = this.config;
+    for (let s = 0; s < SPECIES_COUNT; s++) {
+      const live = this.prey.countBySpecies[s];
+      if (live !== this.syncedCounts[s]) {
+        this.syncedCounts[s] = live;
+        config[this.species[s].countKey] = live;
+      }
+    }
+    if (this.predators.length !== this.syncedPredators) {
+      this.syncedPredators = this.predators.length;
+      config.predatorCount = this.predators.length;
+    }
+  }
+
+  /**
+   * @param {number} s
+   * @param {number} want
+   */
+  adjustPrey(s, want) {
+    const have = this.prey.countBySpecies[s];
+    if (want > have) this.addPrey(s, want - have);
+    else if (want < have) this.removePrey(s, have - want);
+  }
+
+  /** @param {number} want */
+  adjustPredators(want) {
+    while (this.predators.length < want) this.spawnPredator();
+    if (this.predators.length > want) this.predators.length = want;
   }
 
   /**
@@ -353,13 +513,15 @@ export class Simulation {
       const anchor = this.randomMemberOf(s);
       const r = personal * rng.range(1, 2.5);
       const a = rng.angle();
-      this.spawnPreyAt(
+      const i = this.spawnPreyAt(
         s,
         prey.x[anchor] + Math.cos(a) * r,
         prey.y[anchor] + Math.sin(a) * r,
         Math.atan2(prey.hy[anchor], prey.hx[anchor]) + rng.gaussian() * 0.2,
         Math.hypot(prey.vx[anchor], prey.vy[anchor]),
       );
+      prey.geneSpeed[i] = prey.geneSpeed[anchor];
+      prey.genePerception[i] = prey.genePerception[anchor];
     }
   }
 
@@ -420,25 +582,33 @@ export class Simulation {
     return i;
   }
 
+  /** Spawn a predator at a random position. */
   spawnPredator() {
     const rng = this.rng;
-    const PR = this.predatorRuntime;
-    const p = new Predator(
-      this.nextPredatorId++,
-      rng.range(0, this.width),
-      rng.range(0, this.height),
-      rng.angle(),
-      PR.patrolSpeed,
-    );
+    const p = this.spawnPredatorAt(rng.range(0, this.width), rng.range(0, this.height), rng.angle());
     p.stamina = rng.range(0.55, 1);
+    p.energy = rng.range(0.55, 0.85);
+    return p;
+  }
+
+  /**
+   * @param {number} x
+   * @param {number} y
+   * @param {number} heading
+   * @returns {Predator}
+   */
+  spawnPredatorAt(x, y, heading) {
+    const PR = this.predatorRuntime;
+    const p = new Predator(this.nextPredatorId++, wrapCoord(x, this.width), wrapCoord(y, this.height), heading, PR.patrolSpeed);
     p.speedLimit = PR.patrolSpeed * 1.2;
-    p.wander = rng.gaussian();
+    p.wander = this.rng.gaussian();
     this.predators.push(p);
+    return p;
   }
 
   /**
    * Re-initialise prey i as a new individual far from the predators (used after
-   * a catch, so populations stay at their configured size).
+   * a catch while the life cycle is off, so populations keep their size).
    * @param {number} i
    */
   respawnPrey(i) {
@@ -482,6 +652,8 @@ export class Simulation {
     prey.escapeY[i] = 0;
     prey.wander[i] = rng.gaussian();
     prey.age[i] = 0;
+    prey.foodTarget[i] = -1;
+    prey.dead[i] = 0;
   }
 
   /**
@@ -490,6 +662,28 @@ export class Simulation {
    */
   recordCatch(x, y) {
     this.stats.catches++;
-    this.effects.push({ x, y, age: 0, duration: CATCH_EFFECT_DURATION });
+    this.addEffect('catch', x, y, -1);
+  }
+
+  /**
+   * @param {EffectKind} kind
+   * @param {number} x
+   * @param {number} y
+   * @param {number} species Prey species, or -1 for predators.
+   */
+  addEffect(kind, x, y, species) {
+    if (this.effects.length >= EFFECT_LIMIT) this.effects.shift();
+    this.effects.push({ kind, x, y, age: 0, duration: EFFECT_DURATION[kind], species });
+  }
+
+  recordHistory() {
+    const sample = this.historySample;
+    const counts = this.prey.countBySpecies;
+    sample[0] = counts[0];
+    sample[1] = counts[1];
+    sample[2] = counts[2];
+    sample[3] = this.predators.length;
+    sample[4] = this.food.count;
+    this.history.push(sample);
   }
 }

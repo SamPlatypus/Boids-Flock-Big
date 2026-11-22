@@ -2,11 +2,12 @@
  * Species profiles.
  *
  * A profile describes a species' character as multipliers of the global config
- * (`maxSpeed`, `maxForce`, `perceptionRadius`, rule weights, `panicRadius`).
- * The global sliders therefore scale every species at once while each keeps
- * its relative identity. Profiles are plain mutable objects: the simulation
- * holds live copies in `sim.species` and resolves them every step, so they can
- * be tuned at runtime.
+ * (`maxSpeed`, `maxForce`, `perceptionRadius`, rule weights, `panicRadius`,
+ * `carryingCapacity`, …). The global sliders therefore scale every species at
+ * once while each keeps its relative identity. Profiles are plain mutable
+ * objects: the simulation holds live copies in `sim.species` and resolves them
+ * every step, so they can be tuned at runtime. Colours come from the theme
+ * config (`colorSpecies1` …), not from here.
  *
  * @module sim/species
  */
@@ -18,6 +19,7 @@
  * @property {string} key
  * @property {string} name
  * @property {'countSpecies1' | 'countSpecies2' | 'countSpecies3'} countKey Config key holding the population.
+ * @property {'colorSpecies1' | 'colorSpecies2' | 'colorSpecies3'} colorKey Config key holding the colour.
  * @property {number} speed × maxSpeed: calm speed limit.
  * @property {number} cruise Preferred speed as a fraction of the calm limit.
  * @property {number} agility × maxForce: steering acceleration (turning) limit.
@@ -43,9 +45,14 @@
  * @property {number} scatter Pull of the remembered escape heading while panicked (scatter distance).
  * @property {number} flashExpansion Personal-space growth at full panic (flash expansion).
  * @property {number} vulnerability Predator preference bonus when choosing a target.
- * @property {number} length Body length in px (rendering, catch radius).
- * @property {string} color
- * @property {string} alarmColor Tint at full panic.
+ * @property {number} metabolism Energy (of 1) burned per second while cruising.
+ * @property {number} forage Steering weight towards food when starving.
+ * @property {number} forageRange × perception: distance at which food is noticed.
+ * @property {number} mouth Eating reach as a multiple of half the body length.
+ * @property {number} fertility Division rate (1/s) once energy is full, before crowding damping.
+ * @property {number} capacityShare Share of `carryingCapacity` this species can fill.
+ * @property {number} nutrition Energy a predator gains from eating one.
+ * @property {number} length Body length in px (rendering, catch and eating reach).
  */
 
 /** @type {SpeciesProfile[]} */
@@ -54,6 +61,7 @@ const PROFILES = [
     key: 'dartfish',
     name: 'Dartfish',
     countKey: 'countSpecies1',
+    colorKey: 'colorSpecies1',
     // Fast and agile with a short sensory range: tight, hyper-reactive bait balls.
     speed: 1.3,
     cruise: 0.72,
@@ -79,14 +87,20 @@ const PROFILES = [
     scatter: 0.15,
     flashExpansion: 0.9,
     vulnerability: 0.1,
+    metabolism: 0.012,
+    forage: 1.6,
+    forageRange: 1.8,
+    mouth: 1,
+    fertility: 0.2,
+    capacityShare: 0.5,
+    nutrition: 0.22,
     length: 11,
-    color: '#5ee7ff',
-    alarmColor: '#eafdff',
   },
   {
     key: 'manta',
     name: 'Mantas',
     countKey: 'countSpecies2',
+    colorKey: 'colorSpecies2',
     // Large, slow turning, wide perception, alignment-dominated: sweeping ribbons.
     speed: 0.8,
     cruise: 0.85,
@@ -111,17 +125,23 @@ const PROFILES = [
     panicDecay: 0.8,
     scatter: 0.2,
     flashExpansion: 0.3,
-    vulnerability: 0.35,
+    vulnerability: 0,
+    metabolism: 0.008, // big, slow, efficient filter feeders
+    forage: 1.2,
+    forageRange: 1.2,
+    mouth: 1.6, // wide filter-feeding mouth
+    fertility: 0.15,
+    capacityShare: 0.15,
+    nutrition: 0.35,
     length: 18,
-    color: '#b69cff',
-    alarmColor: '#f2edff',
   },
   {
     key: 'forager',
     name: 'Skittish Foragers',
     countKey: 'countSpecies3',
+    colorKey: 'colorSpecies3',
     // Medium build, twitchy wander, random speed bursts, early detection and a
-    // long panic memory: exaggerated scatter.
+    // long panic memory: exaggerated scatter. The best food finders.
     speed: 1,
     cruise: 0.6,
     agility: 1.3,
@@ -146,9 +166,14 @@ const PROFILES = [
     scatter: 0.9,
     flashExpansion: 1.2,
     vulnerability: 0.2,
+    metabolism: 0.008,
+    forage: 2.4,
+    forageRange: 2.8,
+    mouth: 1.1,
+    fertility: 0.25,
+    capacityShare: 0.35,
+    nutrition: 0.3,
     length: 13,
-    color: '#ffcf5a',
-    alarmColor: '#fff6da',
   },
 ];
 
@@ -164,7 +189,8 @@ export const SPECIES_COUNT = SPECIES.length;
 /**
  * Per-step resolved parameters of a species: profile × global config, in world
  * units. Recomputed every step (cheap: one struct per species), so config and
- * profile edits apply immediately.
+ * profile edits apply immediately. Per-individual genes (speed, perception)
+ * scale some of these again in the steering loop.
  */
 export class SpeciesRuntime {
   constructor() {
@@ -172,13 +198,14 @@ export class SpeciesRuntime {
     this.cruiseSpeed = 0;
     this.maxForce = 0;
     this.perception = 0;
-    this.perceptionSq = 0;
     /** smoothstep band on cos(angle to neighbour) implementing the blind cone */
     this.fovCosLow = -3;
     this.fovCosHigh = -2;
     /** Calm separation radius against each species (pairwise average). */
     this.separationRadius = new Float64Array(SPECIES_COUNT);
-    /** Neighbour query radius: covers perception and fully flash-expanded separation. */
+    /** Query radius needed by fully flash-expanded separation. */
+    this.separationQuery = 0;
+    /** Neighbour query radius for an agent with neutral genes. */
     this.queryRadius = 0;
     this.wSeparation = 0;
     this.wAlignment = 0;
@@ -202,6 +229,16 @@ export class SpeciesRuntime {
     this.scatter = 0;
     this.flashExpansion = 0;
     this.vulnerability = 0;
+    /** Energy burned per second at cruise speed (includes energyDecay). */
+    this.metabolism = 0;
+    this.forage = 0;
+    this.forageRange = 0;
+    /** Eating reach (px) from the body centre. */
+    this.mouthRadius = 0;
+    this.fertility = 0;
+    /** Soft population limit of this species. */
+    this.capacity = 0;
+    this.nutrition = 0;
   }
 
   /**
@@ -212,11 +249,11 @@ export class SpeciesRuntime {
    */
   resolve(index, profiles, config, dt) {
     const p = profiles[index];
+    const scatter = config.panicScatter;
     this.maxSpeed = config.maxSpeed * p.speed;
     this.cruiseSpeed = this.maxSpeed * p.cruise;
     this.maxForce = config.maxForce * p.agility;
     this.perception = config.perceptionRadius * p.perception;
-    this.perceptionSq = this.perception * this.perception;
 
     if (p.fieldOfView >= 359.9) {
       this.fovCosLow = -3; // everything visible
@@ -233,7 +270,9 @@ export class SpeciesRuntime {
       this.separationRadius[t] = r;
       if (r > maxSeparation) maxSeparation = r;
     }
-    this.queryRadius = Math.max(this.perception, maxSeparation * (1 + p.flashExpansion));
+    this.flashExpansion = p.flashExpansion * scatter;
+    this.separationQuery = maxSeparation * (1 + this.flashExpansion);
+    this.queryRadius = Math.max(this.perception, this.separationQuery);
 
     this.wSeparation = config.separationWeight * p.separation;
     this.wAlignment = config.alignmentWeight * p.alignment;
@@ -248,13 +287,19 @@ export class SpeciesRuntime {
     this.burstKick = p.burstKick;
     this.threatRadius = config.panicRadius * p.threatRadius;
     this.threatRadiusSq = this.threatRadius * this.threatRadius;
-    this.flee = p.flee;
+    this.flee = p.flee * scatter;
     this.frightSpeed = p.frightSpeed;
     this.alarmTransmission = p.alarmTransmission;
     this.panicDecay = p.panicDecay;
-    this.scatter = p.scatter;
-    this.flashExpansion = p.flashExpansion;
+    this.scatter = p.scatter * scatter;
     this.vulnerability = p.vulnerability;
+    this.metabolism = p.metabolism * config.energyDecay;
+    this.forage = p.forage;
+    this.forageRange = p.forageRange;
+    this.mouthRadius = 0.5 * p.length * p.mouth + 4;
+    this.fertility = p.fertility;
+    this.capacity = config.carryingCapacity * p.capacityShare;
+    this.nutrition = p.nutrition;
   }
 }
 
@@ -270,18 +315,22 @@ export class SpeciesRuntime {
  * @property {number} strikeRange Distance (px) that triggers a strike, at aggression 0.5.
  * @property {number} strikeDuration Lunge duration (s).
  * @property {number} strikeCooldown Recovery after a missed strike before the next (s).
- * @property {number} catchRadius Distance (px) at which a striking predator catches prey.
+ * @property {number} catchRadius Contact distance (px) at which a hunting predator eats prey.
  * @property {number} patrolRegen Stamina gained per second while patrolling.
  * @property {number} restRegen Stamina gained per second while resting.
  * @property {number} pursuitDrain Stamina spent per second while pursuing.
  * @property {number} strikeDrain Stamina spent per second while striking.
+ * @property {number} catchStamina Stamina regained per catch.
+ * @property {number} satiation Rest-length multiplier after a catch.
+ * @property {number} preySwitching Preference for prey species above an even share of the population.
+ * @property {number} metabolism Energy (of 1) burned per second at rest.
+ * @property {number} effortCost Extra energy per second at full pursuit speed (∝ speed²).
+ * @property {number} fertility Division rate (1/s) once energy is full.
+ * @property {number} preyPerPredator Prey the ecosystem needs per predator (soft predator capacity).
  * @property {number} wanderStrength
  * @property {number} wanderRate
  * @property {{ patrol: number, pursue: number, strike: number, rest: number }} threatLevel
  *   How alarming the predator is to prey in each state (prey read intent).
- * @property {string} color
- * @property {string} strikeColor
- * @property {string} restColor
  */
 
 /** @type {Readonly<PredatorProfile>} */
@@ -301,10 +350,14 @@ export const PREDATOR_PROFILE = Object.freeze({
   restRegen: 0.24,
   pursuitDrain: 0.09,
   strikeDrain: 0.6,
+  catchStamina: 0.25,
+  satiation: 1.5,
+  preySwitching: 0.8,
+  metabolism: 0.022,
+  effortCost: 0.02,
+  fertility: 0.4,
+  preyPerPredator: 16,
   wanderStrength: 0.35,
   wanderRate: 0.6,
   threatLevel: Object.freeze({ patrol: 0.65, pursue: 1, strike: 1, rest: 0.3 }),
-  color: '#ff4d5e',
-  strikeColor: '#fff1f2',
-  restColor: '#b0505c',
 });

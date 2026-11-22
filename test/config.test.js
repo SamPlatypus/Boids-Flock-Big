@@ -80,3 +80,16 @@ test('$reset restores defaults and $snapshot is a detached copy', () => {
   config.$reset();
   assert.equal(config.debug, false);
 });
+
+test('colour parameters are normalised to #rrggbb and garbage is rejected', () => {
+  const { config, warnings } = quietConfig();
+  config.colorSpecies1 = '#ABC';
+  assert.equal(config.colorSpecies1, '#aabbcc');
+  config.colorFood = '12ff34';
+  assert.equal(config.colorFood, '#12ff34');
+  config.colorPredator = 'red';
+  assert.equal(config.colorPredator, CONFIG_SCHEMA.colorPredator.default);
+  config.colorBackground = /** @type {any} */ (42);
+  assert.equal(config.colorBackground, CONFIG_SCHEMA.colorBackground.default);
+  assert.equal(warnings.length, 2);
+});

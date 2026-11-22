@@ -19,9 +19,17 @@
  *
  *   1. emergency: flee threats + remembered escape heading + alarm-wave alignment
  *   2. separation
- *   3. alignment, cohesion, wander, cruise-speed control, attractor beacons
+ *   3. alignment, cohesion, grazing, wander, cruise-speed control, attractor beacons
  *
  * so fleeing overrides alignment and cohesion, as panic waves require.
+ *
+ * Grazing (life cycle on): an agent seeks the nearest food particle within
+ * perception × forageRange with weight ∝ hunger², where hunger = 1 − energy.
+ * A well-fed agent stays with its school; a starving one breaks away to feed.
+ * Panic suppresses grazing.
+ *
+ * Genes: each agent's heritable speed and perception multipliers scale its
+ * speed limit, cruise speed and sensing radius.
  *
  * Panic contagion: panic_i rises toward max(direct threat, transmission × max
  * neighbour panic) with a first-order lag, then decays linearly. The lag (rise
@@ -96,6 +104,9 @@ export function computePreySteering(sim, dt) {
   const runtime = sim.speciesRuntime;
   const { x, y, vx, vy, hx, hy, ax, ay, species, panic, panicNext, wander, burst } = prey;
   const { speedLimit, forceLimit, escapeX, escapeY, threatX, threatY, threat, attractX, attractY, crowding } = prey;
+  const { energy, geneSpeed, genePerception, foodTarget, foodTargetId } = prey;
+  const food = sim.food;
+  const grazing = sim.config.ecosystem && food.count > 0;
   const nbIndex = nb.index;
   const nbDx = nb.dx;
   const nbDy = nb.dy;
@@ -107,6 +118,7 @@ export function computePreySteering(sim, dt) {
   for (let i = 0; i < n; i++) {
     const s = species[i];
     const P = runtime[s];
+    foodTarget[i] = -1;
     const vxi = vx[i];
     const vyi = vy[i];
     const speed = Math.sqrt(vxi * vxi + vyi * vyi);
@@ -133,18 +145,22 @@ export function computePreySteering(sim, dt) {
 
     // ── Effective limits ────────────────────────────────────────────────────
     const fmax = P.maxForce * (1 + PANIC_FORCE_BOOST * p + BURST_FORCE_BOOST * b);
-    const vTarget = P.maxSpeed * (1 + (P.frightSpeed - 1) * p) * (1 + P.burstBoost * b);
+    // Heritable genes scale this individual's speed and sensing range.
+    const gs = geneSpeed[i];
+    const baseCruise = P.cruiseSpeed * gs;
+    const vTarget = P.maxSpeed * gs * (1 + (P.frightSpeed - 1) * p) * (1 + P.burstBoost * b);
     const vPrev = speedLimit[i];
     const vmax = nextSpeedLimit(vPrev, vTarget, SPEED_LIMIT_DROP * fmax * dt);
     speedLimit[i] = vmax;
     forceLimit[i] = fmax;
-    const cruise = Math.min(vmax, P.cruiseSpeed * (1 + P.burstBoost * b) + (vmax - P.cruiseSpeed) * p);
+    const cruise = Math.min(vmax, baseCruise * (1 + P.burstBoost * b) + (vmax - baseCruise) * p);
 
     // ── Neighbourhood scan ──────────────────────────────────────────────────
-    const count = grid.query(x[i], y[i], P.queryRadius, i, nb);
+    const perception = P.perception * genePerception[i];
+    const count = grid.query(x[i], y[i], Math.max(perception, P.separationQuery), i, nb);
     const expand = 1 + P.flashExpansion * p;
     const sepRadius = P.separationRadius;
-    const R2 = P.perceptionSq;
+    const R2 = perception * perception;
     const invR2 = 1 / R2;
     const fovLow = P.fovCosLow;
     const fovHigh = P.fovCosHigh;
@@ -281,7 +297,7 @@ export function computePreySteering(sim, dt) {
           const cy = cohY / denom;
           const cMag = Math.sqrt(cx * cx + cy * cy);
           if (cMag > 1e-6) {
-            const urgency = Math.min(1, cMag / (COHESION_REACH * P.perception));
+            const urgency = Math.min(1, cMag / (COHESION_REACH * perception));
             const sx = ((cx / cMag) * cruise - vxi) / vmax;
             const sy = ((cy / cMag) * cruise - vyi) / vmax;
             const ck = truncationFactor(sx, sy, 1) * fmax * wCoh * urgency;
@@ -298,6 +314,28 @@ export function computePreySteering(sim, dt) {
       const cf = CRUISE_GAIN * fmax * clamp((cruise - speed) / (0.25 * vmax), -1, 1);
       gx += hxi * cf;
       gy += hyi * cf;
+      // Grazing: hungry agents peel away from the school towards the nearest
+      // food, more urgently the emptier they are (and not while panicking).
+      if (grazing) {
+        const hunger = 1 - energy[i];
+        if (hunger > 0.02 && p < 0.5) {
+          const f = food.nearest(x[i], y[i], perception * P.forageRange);
+          if (f >= 0) {
+            foodTarget[i] = f;
+            foodTargetId[i] = food.id[f];
+            const fdx = food.nearestBuffer.dx[0];
+            const fdy = food.nearestBuffer.dy[0];
+            const fd = Math.sqrt(fdx * fdx + fdy * fdy);
+            if (fd > 1e-6) {
+              const sx = ((fdx / fd) * cruise - vxi) / vmax;
+              const sy = ((fdy / fd) * cruise - vyi) / vmax;
+              const fk = truncationFactor(sx, sy, 1) * fmax * P.forage * hunger * hunger * (1 - 2 * p);
+              gx += sx * fk;
+              gy += sy * fk;
+            }
+          }
+        }
+      }
       // Attractor beacons.
       const atx = attractX[i];
       const aty = attractY[i];

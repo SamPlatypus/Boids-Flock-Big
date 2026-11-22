@@ -4,20 +4,22 @@
  * - Plain property access: `simConfig.maxSpeed = 200` takes effect on the next
  *   simulation step, since the engine reads the config every step.
  * - Validated: unknown keys (typos) are rejected, numbers are clamped to their
- *   documented range, integers are rounded, and numeric strings are accepted
- *   (handy for `<input>` values and URL parameters).
+ *   documented range, integers are rounded, numeric strings are accepted
+ *   (handy for `<input>` values and URL parameters), and colours are
+ *   normalised to '#rrggbb'.
  * - Observable: `simConfig.$subscribe((key, value, previous) => …)`.
- * - Self-describing: `simConfig.$schema` carries range, step, unit, group and
- *   label for every parameter, so a UI can generate its controls from it.
+ * - Self-describing: `simConfig.$schema` carries type, range, step, unit, group
+ *   and label for every parameter. The UI generates its controls from it.
  *
  * @module config
  */
 
 import { clamp } from './core/math.js';
+import { normalizeHex } from './core/color.js';
 
 /**
  * @typedef {object} ParamSpec
- * @property {'number' | 'integer' | 'boolean' | 'enum'} type
+ * @property {'number' | 'integer' | 'boolean' | 'enum' | 'color'} type
  * @property {number | boolean | string} default
  * @property {number} [min]
  * @property {number} [max]
@@ -40,13 +42,25 @@ import { clamp } from './core/math.js';
  * @property {number} predatorSpeed Predator pursuit speed (px/s).
  * @property {number} predatorAggression 0 = lazy, 1 = relentless.
  * @property {number} panicRadius Prey alert radius around predators (px).
- * @property {number} countSpecies1 Dartfish population.
+ * @property {number} panicScatter Multiplier on the flee / scatter response.
+ * @property {boolean} ecosystem Life cycle on (food, energy, births, starvation) or fixed populations.
+ * @property {number} foodSpawnRate Food particles bloomed per second.
+ * @property {number} energyDecay Metabolic rate multiplier.
+ * @property {number} carryingCapacity Soft limit on the total prey population.
+ * @property {number} countSpecies1 Dartfish population (live: follows births and deaths).
  * @property {number} countSpecies2 Manta population.
  * @property {number} countSpecies3 Skittish Forager population.
  * @property {number} predatorCount
  * @property {'auto' | 'attract' | 'repel'} beaconMode
  * @property {number} beaconStrength
  * @property {number} pulseStrength
+ * @property {number} trails Motion-trail persistence per 1/60 s (0 = crisp redraw).
+ * @property {string} colorBackground
+ * @property {string} colorSpecies1
+ * @property {string} colorSpecies2
+ * @property {string} colorSpecies3
+ * @property {string} colorPredator
+ * @property {string} colorFood
  * @property {boolean} paused
  * @property {number} timeScale
  * @property {number} maxPixelRatio
@@ -100,13 +114,13 @@ export const CONFIG_SCHEMA = Object.freeze({
   },
   maxForce: {
     type: 'number', default: 420, min: 20, max: 3000, step: 10, unit: 'px/s²',
-    group: 'Flocking', label: 'Max force',
+    group: 'Flocking', label: 'Turning force',
     description: 'Base steering acceleration (turning) limit; species apply multipliers.',
   },
   perceptionRadius: {
     type: 'number', default: 48, min: 10, max: 200, step: 1, unit: 'px',
     group: 'Flocking', label: 'Perception',
-    description: 'Base neighbourhood radius for alignment and cohesion.',
+    description: 'Base neighbourhood radius for alignment, cohesion and foraging.',
   },
   // ── Predators ───────────────────────────────────────────────────────────────
   predatorSpeed: {
@@ -124,6 +138,32 @@ export const CONFIG_SCHEMA = Object.freeze({
     group: 'Predators', label: 'Panic radius',
     description: 'Distance at which prey detect a predator and flee.',
   },
+  panicScatter: {
+    type: 'number', default: 1, min: 0, max: 3, step: 0.05, unit: '×',
+    group: 'Predators', label: 'Panic scatter',
+    description: 'Strength of the flee response, escape memory and flash expansion.',
+  },
+  // ── Ecosystem ───────────────────────────────────────────────────────────────
+  ecosystem: {
+    type: 'boolean', default: true,
+    group: 'Ecosystem', label: 'Life cycle',
+    description: 'Food, energy, births and starvation. Off: fixed populations.',
+  },
+  foodSpawnRate: {
+    type: 'number', default: 24, min: 0, max: 120, step: 0.5, unit: '/s',
+    group: 'Ecosystem', label: 'Food spawn rate',
+    description: 'Food particles bloomed per second.',
+  },
+  energyDecay: {
+    type: 'number', default: 1, min: 0.2, max: 3, step: 0.05, unit: '×',
+    group: 'Ecosystem', label: 'Energy decay',
+    description: 'Metabolic rate. Energy drains faster at higher speed.',
+  },
+  carryingCapacity: {
+    type: 'integer', default: 480, min: 50, max: 2000, step: 10,
+    group: 'Ecosystem', label: 'Carrying capacity',
+    description: 'Soft limit on total prey: births slow down as it fills.',
+  },
   // ── Population ──────────────────────────────────────────────────────────────
   countSpecies1: {
     type: 'integer', default: 160, min: 0, max: 3000, step: 1,
@@ -137,11 +177,11 @@ export const CONFIG_SCHEMA = Object.freeze({
   },
   countSpecies3: {
     type: 'integer', default: 100, min: 0, max: 3000, step: 1,
-    group: 'Population', label: 'Skittish Foragers',
-    description: 'Erratic bursts, exaggerated scatter when threatened.',
+    group: 'Population', label: 'Foragers',
+    description: 'Skittish: erratic bursts, exaggerated scatter when threatened.',
   },
   predatorCount: {
-    type: 'integer', default: 2, min: 0, max: 12, step: 1,
+    type: 'integer', default: 3, min: 0, max: 40, step: 1,
     group: 'Population', label: 'Predators',
     description: 'Number of apex predators.',
   },
@@ -152,14 +192,50 @@ export const CONFIG_SCHEMA = Object.freeze({
     description: 'Press-and-hold beacon: auto = one finger attracts, two or more fingers all repel.',
   },
   beaconStrength: {
-    type: 'number', default: 1, min: 0, max: 3, step: 0.05,
+    type: 'number', default: 1, min: 0, max: 3, step: 0.05, unit: '×',
     group: 'Interaction', label: 'Beacon strength',
     description: 'Strength of press-and-hold attractors and repulsors.',
   },
   pulseStrength: {
-    type: 'number', default: 1, min: 0, max: 3, step: 0.05,
+    type: 'number', default: 1, min: 0, max: 3, step: 0.05, unit: '×',
     group: 'Interaction', label: 'Pulse strength',
     description: 'Strength of the tap scatter shockwave.',
+  },
+  // ── Appearance ──────────────────────────────────────────────────────────────
+  trails: {
+    type: 'number', default: 0, min: 0, max: 0.95, step: 0.01,
+    group: 'Appearance', label: 'Motion trails',
+    description: 'Trail persistence: 0 redraws crisply, higher values leave glowing wakes.',
+  },
+  colorBackground: {
+    type: 'color', default: '#040d1a',
+    group: 'Appearance', label: 'Background',
+    description: 'Canvas background colour.',
+  },
+  colorSpecies1: {
+    type: 'color', default: '#3cf2ff',
+    group: 'Appearance', label: 'Dartfish',
+    description: 'Species 1 colour (also the UI accent).',
+  },
+  colorSpecies2: {
+    type: 'color', default: '#a77bff',
+    group: 'Appearance', label: 'Mantas',
+    description: 'Species 2 colour.',
+  },
+  colorSpecies3: {
+    type: 'color', default: '#b6ff3b',
+    group: 'Appearance', label: 'Foragers',
+    description: 'Species 3 colour.',
+  },
+  colorPredator: {
+    type: 'color', default: '#ff2e4d',
+    group: 'Appearance', label: 'Predators',
+    description: 'Predator colour.',
+  },
+  colorFood: {
+    type: 'color', default: '#ff7ad9',
+    group: 'Appearance', label: 'Food',
+    description: 'Food / flora colour.',
   },
   // ── Simulation ──────────────────────────────────────────────────────────────
   paused: {
@@ -168,19 +244,19 @@ export const CONFIG_SCHEMA = Object.freeze({
     description: 'Freeze the simulation (rendering continues).',
   },
   timeScale: {
-    type: 'number', default: 1, min: 0, max: 4, step: 0.05,
+    type: 'number', default: 1, min: 0, max: 4, step: 0.05, unit: '×',
     group: 'Simulation', label: 'Time scale',
     description: 'Slow motion (< 1) or fast forward (> 1). The physics step stays fixed.',
   },
   maxPixelRatio: {
-    type: 'number', default: 3, min: 0.5, max: 4, step: 0.25,
+    type: 'number', default: 3, min: 0.5, max: 4, step: 0.25, unit: '×',
     group: 'Simulation', label: 'Resolution cap',
     description: 'Upper bound on devicePixelRatio used for the canvas backing store.',
   },
   showStats: {
-    type: 'boolean', default: true,
-    group: 'Simulation', label: 'Stats',
-    description: 'Show the FPS / timing overlay.',
+    type: 'boolean', default: false,
+    group: 'Simulation', label: 'Performance stats',
+    description: 'Show the detailed FPS / timing overlay.',
   },
   debug: {
     type: 'boolean', default: false,
@@ -191,6 +267,9 @@ export const CONFIG_SCHEMA = Object.freeze({
 
 /** @type {readonly ConfigKey[]} */
 export const CONFIG_KEYS = /** @type {ConfigKey[]} */ (Object.keys(CONFIG_SCHEMA));
+
+/** Population keys in species order. */
+export const COUNT_KEYS = /** @type {const} */ (['countSpecies1', 'countSpecies2', 'countSpecies3']);
 
 /**
  * Own-property test (Object.hasOwn needs iOS 15.4+; this works everywhere).
@@ -223,6 +302,11 @@ function coerce(spec, raw) {
       const options = spec.options ?? [];
       if (typeof raw === 'string' && options.includes(raw)) return { ok: true, value: raw, clamped: false };
       return { ok: false, reason: `expected one of ${options.join(' | ')}, got ${String(raw)}` };
+    }
+    case 'color': {
+      const hex = normalizeHex(raw);
+      if (hex) return { ok: true, value: hex, clamped: false };
+      return { ok: false, reason: `expected a hex colour like #3cf2ff, got ${String(raw)}` };
     }
     case 'number':
     case 'integer': {

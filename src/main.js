@@ -1,10 +1,12 @@
 /**
- * Browser entry point: boots the engine on the full-bleed canvas and exposes
+ * Browser entry point: boots the engine on the full-bleed canvas, mounts the
+ * glassmorphic HUD and exposes
  *   window.simConfig: reactive configuration
  *   window.sim:       the app controller (sim, renderer, loop, …)
  *
- * Any config key can be preset from the URL, e.g. `?countSpecies1=500&debug=1`,
- * and `?seed=42` makes the run reproducible.
+ * Settings persist in localStorage between visits. Any config key can also be
+ * preset from the URL (which wins), e.g. `?countSpecies1=500&debug=1`, and
+ * `?seed=42` makes the run reproducible.
  *
  * Desktop shortcuts: Space pause · D debug · S stats · R reset.
  *
@@ -13,6 +15,8 @@
 
 import { createFlockingApp } from './app.js';
 import { isConfigKey } from './config.js';
+import { loadSettings, persistSettings } from './persist.js';
+import { createHud } from './ui/hud.js';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('sim'));
 const statsElement = document.getElementById('stats');
@@ -26,12 +30,14 @@ const seedParam = params.get('seed');
 const app = createFlockingApp({
   canvas,
   statsElement,
-  config: overrides,
+  config: { ...loadSettings(), ...overrides },
   seed: seedParam !== null && seedParam !== '' && Number.isFinite(Number(seedParam)) ? Number(seedParam) : undefined,
 });
 
 window.simConfig = app.config;
 window.sim = app;
+persistSettings(app.config);
+createHud(app);
 app.start();
 
 window.addEventListener('keydown', (e) => {

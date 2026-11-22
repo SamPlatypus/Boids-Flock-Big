@@ -18,6 +18,8 @@ test('the standalone build is a single self-contained classic script', async () 
   assert.ok(!html.includes('dist/boids.html'), 'dev-only file:// redirect stripped');
   assert.ok(!html.includes('serviceWorker'), 'hosted-only service worker registration stripped');
   assert.ok(!html.includes('manifest.webmanifest'), 'hosted-only manifest link stripped');
+  assert.ok(!/<link[^>]+stylesheet/.test(html), 'stylesheets inlined');
+  assert.ok(html.includes('backdrop-filter: blur(12px)'), 'UI styles present');
   const scripts = [...html.matchAll(/<script>\n([\s\S]*?)\n\s*<\/script>/g)];
   assert.equal(scripts.length, 1, 'exactly one inline script');
   assert.doesNotThrow(() => new Function(scripts[0][1]), 'bundle parses');

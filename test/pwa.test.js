@@ -15,12 +15,12 @@ async function listModules(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...(await listModules(path)));
-    else if (entry.name.endsWith('.js')) out.push(path);
+    else if (entry.name.endsWith('.js') || entry.name.endsWith('.css')) out.push(path);
   }
   return out;
 }
 
-test('the service worker precaches every module, and every precached file exists', async () => {
+test('the service worker precaches every module and stylesheet, and every precached file exists', async () => {
   const sw = await readFile(join(ROOT, 'sw.js'), 'utf8');
   const block = sw.match(/const PRECACHE = \[([\s\S]*?)\];/);
   assert.ok(block, 'PRECACHE array found');

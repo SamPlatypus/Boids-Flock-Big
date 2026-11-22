@@ -20,6 +20,8 @@ import { PointerInput } from './input/pointer-input.js';
 import { Renderer } from './render/renderer.js';
 import { CanvasSurface } from './render/surface.js';
 import { FIXED_DT, Simulation } from './sim/simulation.js';
+import { areaFactor } from './sim/ecology.js';
+import { SCENARIOS, scaleForArea } from './presets.js';
 import { StatsOverlay } from './stats.js';
 
 /** @typedef {import('./config.js').ReactiveConfig} ReactiveConfig */
@@ -38,6 +40,9 @@ import { StatsOverlay } from './stats.js';
  * @property {() => void} stop Stop the frame loop.
  * @property {(seed?: number) => void} reset Respawn everything (new random seed unless given).
  * @property {(steps?: number) => void} step Advance manually (e.g. while paused) and redraw.
+ * @property {(id: string) => void} applyScenario Apply a preset (populations scaled to the screen area).
+ * @property {() => void} resetDefaults Restore every setting to its default (scaled to the screen area).
+ * @property {() => number} areaFactor Ecosystem scale of the current world relative to a phone screen.
  * @property {() => void} destroy Detach listeners and stop.
  */
 
@@ -50,8 +55,17 @@ import { StatsOverlay } from './stats.js';
  * @returns {FlockingApp}
  */
 export function createFlockingApp({ canvas, statsElement = null, config: overrides = {}, seed }) {
-  const config = createConfig(overrides);
-  const surface = new CanvasSurface(canvas, () => config.maxPixelRatio);
+  // The world size is needed first: ecosystem defaults scale with its area.
+  /** @type {ReactiveConfig | null} */
+  let configRef = null;
+  const surface = new CanvasSurface(canvas, () => (configRef ? configRef.maxPixelRatio : 3));
+  const scaledDefaults = () => {
+    const balance = /** @type {import('./presets.js').Scenario} */ (SCENARIOS.find((s) => s.id === 'balance'));
+    return scaleForArea(balance.patch, areaFactor(surface.width, surface.height));
+  };
+  const config = createConfig({ ...scaledDefaults(), ...overrides });
+  configRef = config;
+  surface.measure();
   const sim = new Simulation({
     config,
     width: surface.width,
@@ -102,6 +116,16 @@ export function createFlockingApp({ canvas, statsElement = null, config: overrid
     start: () => loop.start(),
     stop: () => loop.stop(),
     reset: (newSeed) => sim.reset(newSeed ?? randomSeed()),
+    applyScenario: (id) => {
+      const scenario = SCENARIOS.find((s) => s.id === id);
+      if (!scenario) throw new Error(`unknown scenario "${id}"`);
+      config.$set({ ...scaleForArea(scenario.patch, areaFactor(sim.width, sim.height)), paused: false });
+    },
+    resetDefaults: () => {
+      config.$reset();
+      config.$set(scaledDefaults());
+    },
+    areaFactor: () => areaFactor(sim.width, sim.height),
     step: (steps = 1) => {
       for (let k = 0; k < steps; k++) sim.step(FIXED_DT);
       renderer.render(1, performance.now());

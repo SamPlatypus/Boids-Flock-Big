@@ -7,9 +7,10 @@
  * successful response; falls back to the cache when offline. Online users
  * always get the latest files, so deploys never serve stale code.
  *
- * Keep PRECACHE in sync with src/ (test/pwa.test.js enforces this).
+ * Keep PRECACHE in sync with src/ (test/pwa.test.js enforces this). Bump
+ * CACHE when the list changes so old caches are dropped.
  */
-const CACHE = 'boids-v1';
+const CACHE = 'boids-v2';
 
 const PRECACHE = [
   './',
@@ -20,6 +21,7 @@ const PRECACHE = [
   './icons/icon-192.png',
   './src/app.js',
   './src/config.js',
+  './src/core/color.js',
   './src/core/emitter.js',
   './src/core/math.js',
   './src/core/rng.js',
@@ -28,16 +30,27 @@ const PRECACHE = [
   './src/input/pointer-input.js',
   './src/loop.js',
   './src/main.js',
+  './src/persist.js',
+  './src/presets.js',
   './src/render/renderer.js',
   './src/render/shapes.js',
   './src/render/surface.js',
+  './src/sim/ecology.js',
   './src/sim/flocking.js',
+  './src/sim/food.js',
+  './src/sim/history.js',
   './src/sim/interactions.js',
   './src/sim/predator.js',
   './src/sim/prey-pool.js',
   './src/sim/simulation.js',
   './src/sim/species.js',
   './src/stats.js',
+  './src/themes.js',
+  './src/ui/chart.js',
+  './src/ui/controls.js',
+  './src/ui/dom.js',
+  './src/ui/hud.js',
+  './src/ui/ui.css',
 ];
 
 self.addEventListener('install', (event) => {

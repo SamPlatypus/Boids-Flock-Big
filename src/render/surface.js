@@ -19,6 +19,8 @@ export class CanvasSurface {
    * @param {() => number} getMaxPixelRatio Upper bound on the pixel ratio (performance cap).
    */
   constructor(canvas, getMaxPixelRatio) {
+    // Transparent: the vignette behind the canvas is its CSS background (see
+    // Renderer.updateBackdrop), so a frame starts with a cheap clearRect.
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Canvas 2D is not supported in this browser.');
     this.canvas = canvas;

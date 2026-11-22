@@ -3,7 +3,8 @@
  * Zero-dependency bundler → dist/boids.html
  *
  * Inlines the ES-module graph rooted at src/main.js into a single classic
- * <script> inside a copy of index.html. The result is one self-contained file
+ * <script>, and every local stylesheet into a <style>, inside a copy of
+ * index.html. The result is one self-contained file
  * that runs from file:// (double-click it, AirDrop it to a phone) with no
  * server and no network.
  *
@@ -126,7 +127,14 @@ export async function buildStandalone() {
   const iconHref = `data:image/svg+xml,${encodeURIComponent(icon.trim())}`;
   const tag = '<script type="module" src="./src/main.js"></script>';
   if (!html.includes(tag)) throw new Error(`index.html must contain ${tag}`);
-  return html
+  // Inline local stylesheets.
+  const stylesheets = [...html.matchAll(/<link rel="stylesheet" href="\.\/([^"]+)">/g)];
+  let page = html;
+  for (const [linkTag, href] of stylesheets) {
+    const css = (await readFile(resolve(ROOT, href), 'utf8')).replaceAll('</style', '<\\/style').trim();
+    page = page.replace(linkTag, () => `<style>\n${css}\n  </style>`);
+  }
+  return page
     .replace(/[ \t]*<!-- dev-only:start -->[\s\S]*?<!-- dev-only:end -->\n?/g, '')
     .replace(/[ \t]*<!-- hosted-only:start -->[\s\S]*?<!-- hosted-only:end -->\n?/g, '')
     .replace('</title>', `</title>\n  <link rel="icon" href="${iconHref}">`)

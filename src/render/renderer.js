@@ -11,34 +11,73 @@
  *   geometry is also what GPU canvas backends cache best.
  * - Agents are bucketed by (species, panic level) with a counting sort, so
  *   fillStyle changes at most 12 times per frame.
+ * - Food is a pre-rendered glow sprite blitted without rotation.
  * - Nothing is allocated per agent per frame.
+ * - The vignette is the canvas element's CSS background, updated only when
+ *   the colour or size changes. The browser composites it every frame for
+ *   free, and a frame starts with clearRect. Filling the full-screen radial
+ *   gradient into the canvas every frame cost a 4× CPU-throttled phone
+ *   emulation about two thirds of its frame rate (60 → 20 fps), because
+ *   wherever canvas pixels are drawn by the CPU the gradient is re-evaluated
+ *   for every pixel of every frame.
  *
  * Correctness:
  * - Positions are interpolated between the last two physics steps along the
  *   shortest toroidal path, so motion is smooth at 60/90/120 Hz with a fixed
  *   60 Hz simulation, and nothing streaks across the screen when wrapping.
- * - Shadow rendering: an agent whose silhouette overlaps an edge is also drawn
- *   at its wrapped image(s) on the opposite side (up to 3 extra copies near
- *   corners), so agents slide across seams instead of popping.
+ * - Shadow rendering: anything overlapping an edge is also drawn at its
+ *   wrapped image(s), so agents slide across seams instead of popping.
+ *
+ * Theming: every colour derives from the six config colours (background,
+ * three species, predator, food). Panic tints, strike / rest shades and UI
+ * glows are mixed from them, so any custom palette stays coherent.
+ *
+ * Trails: with `config.trails` > 0 the frame is not cleared. The flat
+ * background colour is painted translucently instead (alpha = 1 −
+ * trails^(dt·60), frame-rate independent), so earlier frames fade into
+ * glowing wakes and the canvas turns opaque, covering the vignette. (Additive
+ * agent blending was tried and rejected: overlapping copies saturate to white
+ * and species lose their colour.) Measured in Chromium, repeated translucent
+ * *gradient* fills stall a few levels above their target (shader dithering),
+ * and so do 'destination-out' fades towards transparency. Both leave ghost
+ * trails burned into dark backgrounds, while flat source-over fills converge
+ * exactly. So the vignette shows only when trails are off.
  *
  * @module render/renderer
  */
 
 import { lerp, smoothstep } from '../core/math.js';
+import { hexToRgb, mixHex, rgba, scaleHex } from '../core/color.js';
 import { wrapCoord, wrapDelta } from '../core/torus.js';
 import { BEACON, PULSE } from '../sim/interactions.js';
+import { FOOD } from '../sim/food.js';
 import { SPECIES_COUNT } from '../sim/species.js';
 import { PREDATOR_SHAPE, SPECIES_SHAPES, shapeRadius } from './shapes.js';
 
 /** @typedef {import('../sim/simulation.js').Simulation} Simulation */
+/** @typedef {import('../sim/simulation.js').Effect} Effect */
 /** @typedef {import('../config.js').SimConfig} SimConfig */
 /** @typedef {import('./surface.js').CanvasSurface} CanvasSurface */
 
 const PANIC_LEVELS = 4;
-/** Fraction of the alarm colour mixed in at each panic level. */
+/** Fraction of the alarm tint mixed in at each panic level. */
 const PANIC_TINT = [0, 0.38, 0.68, 1];
 /** Seconds for a newborn agent to grow to full size. */
 const GROW_TIME = 0.6;
+/** Glow radius of a food particle (CSS px). */
+const FOOD_GLOW = 7;
+/** Seconds between slightly stronger fades: insurance against blend-rounding stalls on other GPUs. */
+const TRAIL_CLEANUP_INTERVAL = 0.4;
+const TRAIL_CLEANUP_ALPHA = 0.16;
+/**
+ * Seconds after trails are switched on before the background is sealed. By
+ * then the crossfade from the vignette is visually complete (≥ 99.8 % at the
+ * strongest trails), but blend rounding stalls the transparent pixels below
+ * their target: alpha at about 253/255 and colour a few levels under the
+ * background, which would leave the paths agents took (where pixels converged
+ * from above, exactly) visible as a faint map forever.
+ */
+const TRAIL_SEAL_DELAY = 2;
 const TAU = Math.PI * 2;
 
 /**
@@ -50,25 +89,11 @@ function panicLevel(p) {
 }
 
 /**
- * @param {string} hex '#rrggbb'
- * @returns {[number, number, number]}
+ * @param {string} hex
+ * @returns {string} 'r, g, b' for building rgba() strings.
  */
-function parseHex(hex) {
-  const v = parseInt(hex.slice(1), 16);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-}
-
-/**
- * @param {string} a
- * @param {string} b
- * @param {number} t
- * @returns {string} CSS rgb() colour.
- */
-function mixHex(a, b, t) {
-  const ca = parseHex(a);
-  const cb = parseHex(b);
-  const c = ca.map((v, i) => Math.round(lerp(v, cb[i], t)));
-  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+function rgbList(hex) {
+  return hexToRgb(hex).join(', ');
 }
 
 /**
@@ -149,6 +174,61 @@ function wrapOffsets(x, y, r, W, H, out) {
   return n / 2;
 }
 
+/** Every drawing colour, derived from the six theme colours of the config. */
+class Theme {
+  constructor() {
+    this.key = '';
+    this.background = '#000000';
+    /** Fill per (species, panic level) bucket. */
+    this.bucket = new Array(SPECIES_COUNT * PANIC_LEVELS).fill('#ffffff');
+    this.species = new Array(SPECIES_COUNT).fill('#ffffff');
+    this.predator = '#ffffff';
+    this.predatorStrike = '#ffffff';
+    this.predatorRest = '#ffffff';
+    this.predatorOutline = '#ffffff';
+    this.food = '#ffffff';
+    /** 'r, g, b' strings for translucent strokes. */
+    this.pulseRgb = '255, 255, 255';
+    this.attractRgb = '255, 255, 255';
+    this.repelRgb = '255, 255, 255';
+    this.speciesRgb = new Array(SPECIES_COUNT).fill('255, 255, 255');
+    this.predatorRgb = '255, 255, 255';
+    this.starveRgb = new Array(SPECIES_COUNT).fill('255, 255, 255');
+  }
+
+  /**
+   * @param {SimConfig} config
+   * @returns {boolean} Whether anything changed.
+   */
+  update(config) {
+    const species = [config.colorSpecies1, config.colorSpecies2, config.colorSpecies3];
+    const key = [config.colorBackground, ...species, config.colorPredator, config.colorFood].join();
+    if (key === this.key) return false;
+    this.key = key;
+    const bg = config.colorBackground;
+    this.background = bg;
+    for (let s = 0; s < SPECIES_COUNT; s++) {
+      const base = species[s];
+      const alarm = mixHex(base, '#ffffff', 0.85);
+      this.species[s] = base;
+      this.speciesRgb[s] = rgbList(base);
+      this.starveRgb[s] = rgbList(mixHex(base, bg, 0.5));
+      for (let l = 0; l < PANIC_LEVELS; l++) this.bucket[s * PANIC_LEVELS + l] = mixHex(base, alarm, PANIC_TINT[l]);
+    }
+    const pred = config.colorPredator;
+    this.predator = pred;
+    this.predatorRgb = rgbList(pred);
+    this.predatorStrike = mixHex(pred, '#ffffff', 0.88);
+    this.predatorRest = mixHex(pred, bg, 0.45);
+    this.predatorOutline = rgba(mixHex(pred, '#ffffff', 0.8), 0.85);
+    this.food = config.colorFood;
+    this.pulseRgb = rgbList(mixHex(species[0], '#ffffff', 0.7));
+    this.attractRgb = rgbList(mixHex(species[0], '#ffffff', 0.25));
+    this.repelRgb = rgbList(mixHex(pred, '#ffffff', 0.2));
+    return true;
+  }
+}
+
 export class Renderer {
   /**
    * @param {CanvasSurface} surface
@@ -159,14 +239,12 @@ export class Renderer {
     this.surface = surface;
     this.sim = sim;
     this.config = config;
+    this.theme = new Theme();
     const buckets = SPECIES_COUNT * PANIC_LEVELS;
     this.bucketStart = new Int32Array(buckets + 1);
     this.bucketCursor = new Int32Array(buckets);
     this.bucketOf = new Int32Array(0);
     this.bucketItems = new Int32Array(0);
-    /** @type {string[]} fill colour per bucket */
-    this.palette = new Array(buckets).fill('#fff');
-    this.paletteKey = '';
     this.offsets = new Float64Array(8);
     this.shapeRadii = SPECIES_SHAPES.map(shapeRadius);
     this.predatorRadius = shapeRadius(PREDATOR_SHAPE);
@@ -178,19 +256,38 @@ export class Renderer {
       path.closePath();
       return path;
     });
+    /** Colour and size the CSS vignette behind the canvas was last built for. */
+    this.backdropKey = '';
+    /** @type {HTMLCanvasElement | null} */
+    this.foodSprite = null;
+    this.foodSpriteKey = '';
+    this.lastTime = -1;
+    this.cleanupClock = 0;
+    /** Seconds since trails were switched on (−1: off). Sealed once ≥ TRAIL_SEAL_DELAY. */
+    this.trailsAge = -1;
+    /** Backing-store size of the last painted frame (a resize clears the canvas). */
+    this.paintedWidth = -1;
+    this.paintedHeight = -1;
   }
 
   /**
    * Draw one frame.
    * @param {number} alpha Interpolation factor ∈ [0, 1) between the last two steps.
-   * @param {number} timeMs Frame timestamp (animations only).
+   * @param {number} timeMs Frame timestamp (animations and trail fading).
    */
   render(alpha, timeMs) {
-    const { ctx, scaleX, scaleY } = this.surface;
+    const { ctx, scaleX, scaleY, canvas } = this.surface;
     const W = this.sim.width;
     const H = this.sim.height;
+    const frameDt = this.lastTime < 0 ? 1 / 60 : Math.min(0.1, Math.max(0, (timeMs - this.lastTime) / 1000));
+    this.lastTime = timeMs;
+    this.theme.update(this.config);
     ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
-    ctx.clearRect(0, 0, W, H);
+    const fresh = canvas.width !== this.paintedWidth || canvas.height !== this.paintedHeight;
+    this.paintedWidth = canvas.width;
+    this.paintedHeight = canvas.height;
+    this.drawBackground(ctx, W, H, fresh ? 0 : frameDt, fresh);
+    this.drawFood(ctx, W, H, timeMs / 1000);
     this.drawPulses(ctx, W, H);
     this.drawPrey(ctx, alpha, W, H);
     this.drawPredators(ctx, alpha, W, H);
@@ -199,14 +296,133 @@ export class Renderer {
     if (this.config.debug) this.drawDebug(ctx, alpha, W, H);
   }
 
-  refreshPalette() {
-    const species = this.sim.species;
-    const key = species.map((p) => p.color + p.alarmColor).join();
-    if (key === this.paletteKey) return;
-    this.paletteKey = key;
-    for (let s = 0; s < SPECIES_COUNT; s++) {
-      for (let l = 0; l < PANIC_LEVELS; l++) {
-        this.palette[s * PANIC_LEVELS + l] = mixHex(species[s].color, species[s].alarmColor, PANIC_TINT[l]);
+  /**
+   * Start a frame: clear to the CSS vignette behind the canvas or, with
+   * trails, fade the previous frame towards the flat background colour.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {number} W
+   * @param {number} H
+   * @param {number} frameDt
+   * @param {boolean} fresh The canvas was just cleared (first frame / resize).
+   */
+  drawBackground(ctx, W, H, frameDt, fresh) {
+    const bg = this.theme.background;
+    this.updateBackdrop(bg, W, H);
+    const trails = this.config.trails;
+    if (trails <= 0) {
+      ctx.clearRect(0, 0, W, H);
+      this.trailsAge = -1;
+      return;
+    }
+    if (fresh) {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, W, H);
+      this.trailsAge = TRAIL_SEAL_DELAY;
+      return;
+    }
+    if (this.trailsAge < TRAIL_SEAL_DELAY) {
+      // Just switched on: the translucent fills below also fade out the
+      // vignette, as transparent pixels gain opacity. Once that is complete,
+      // seal: an opaque 'lighten' fill makes every pixel opaque and lifts any
+      // channel that stalled below the background to exactly the background,
+      // while brighter trail pixels keep their colour.
+      this.trailsAge = Math.max(0, this.trailsAge) + frameDt;
+      if (this.trailsAge >= TRAIL_SEAL_DELAY) {
+        ctx.globalCompositeOperation = 'lighten';
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+    }
+    let alpha = 1 - Math.pow(trails, frameDt * 60);
+    this.cleanupClock += frameDt;
+    if (this.cleanupClock >= TRAIL_CLEANUP_INTERVAL) {
+      this.cleanupClock = 0;
+      alpha = Math.max(alpha, TRAIL_CLEANUP_ALPHA);
+    }
+    if (alpha <= 0) return;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = bg; // flat: converges exactly (see module notes)
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Keep the vignette behind the canvas (its CSS background) in step with the
+   * background colour and the world size.
+   * @param {string} bg
+   * @param {number} W
+   * @param {number} H
+   */
+  updateBackdrop(bg, W, H) {
+    const key = `${bg}|${W}|${H}`;
+    if (key === this.backdropKey) return;
+    this.backdropKey = key;
+    const r = Math.round(Math.max(W, H) * 0.8);
+    const style = this.surface.canvas.style;
+    style.backgroundColor = bg;
+    // Multiplicative shading: pure black stays black (OLED palettes).
+    style.backgroundImage =
+      `radial-gradient(circle ${r}px at 50% 42%, ${scaleHex(bg, 1.7)} 0px, ` +
+      `${bg} ${Math.round(r * 0.55)}px, ${scaleHex(bg, 0.5)} ${r}px)`;
+  }
+
+  /**
+   * Glow sprite for food, rendered at device resolution for the current colour.
+   * @returns {HTMLCanvasElement}
+   */
+  getFoodSprite() {
+    const scale = this.surface.scaleX;
+    const key = `${this.theme.food}|${scale}`;
+    if (this.foodSprite && key === this.foodSpriteKey) return this.foodSprite;
+    const size = Math.max(4, Math.ceil(2 * FOOD_GLOW * scale));
+    const sprite = this.foodSprite ?? document.createElement('canvas');
+    sprite.width = size;
+    sprite.height = size;
+    const g = /** @type {CanvasRenderingContext2D} */ (sprite.getContext('2d'));
+    const r = size / 2;
+    const gradient = g.createRadialGradient(r, r, 0, r, r, r);
+    const color = this.theme.food;
+    gradient.addColorStop(0, rgba(mixHex(color, '#ffffff', 0.5), 1));
+    gradient.addColorStop(0.2, rgba(color, 0.95));
+    gradient.addColorStop(0.45, rgba(color, 0.32));
+    gradient.addColorStop(1, rgba(color, 0));
+    g.clearRect(0, 0, size, size);
+    g.fillStyle = gradient;
+    g.fillRect(0, 0, size, size);
+    this.foodSprite = sprite;
+    this.foodSpriteKey = key;
+    return sprite;
+  }
+
+  /**
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {number} W
+   * @param {number} H
+   * @param {number} time Seconds (twinkle).
+   */
+  drawFood(ctx, W, H, time) {
+    const food = this.sim.food;
+    if (food.count === 0) return;
+    const sprite = this.getFoodSprite();
+    const { x, y, age, life, phase, eaten } = food;
+    for (let i = 0; i < food.count; i++) {
+      if (eaten[i]) continue;
+      let k = age[i] < FOOD.growTime ? smoothstep(0, FOOD.growTime, age[i]) : 1;
+      const left = life[i] - age[i];
+      if (left < FOOD.fadeTime) k *= smoothstep(0, FOOD.fadeTime, left);
+      k *= 1 + 0.16 * Math.sin(time * 2.4 + phase[i]);
+      if (k <= 0.02) continue;
+      const r = FOOD_GLOW * k;
+      const fx = x[i];
+      const fy = y[i];
+      ctx.drawImage(sprite, fx - r, fy - r, 2 * r, 2 * r);
+      if (fx < r || fx > W - r || fy < r || fy > H - r) {
+        const count = wrapOffsets(fx, fy, r, W, H, this.offsets);
+        for (let k2 = 1; k2 < count; k2++) {
+          ctx.drawImage(sprite, fx + this.offsets[2 * k2] - r, fy + this.offsets[2 * k2 + 1] - r, 2 * r, 2 * r);
+        }
       }
     }
   }
@@ -221,7 +437,6 @@ export class Renderer {
     const prey = this.sim.prey;
     const n = prey.count;
     if (n === 0) return;
-    this.refreshPalette();
     if (this.bucketOf.length < n) {
       this.bucketOf = new Int32Array(prey.capacity);
       this.bucketItems = new Int32Array(prey.capacity);
@@ -245,6 +460,7 @@ export class Renderer {
     for (let i = 0; i < n; i++) items[cursor[bucketOf[i]]++] = i;
 
     const profiles = this.sim.species;
+    const palette = this.theme.bucket;
     const sx = this.surface.scaleX;
     const sy = this.surface.scaleY;
     for (let b = 0; b < buckets; b++) {
@@ -255,7 +471,7 @@ export class Renderer {
       const path = this.preyPaths[s];
       const length = profiles[s].length;
       const radius = this.shapeRadii[s] * length;
-      ctx.fillStyle = this.palette[b];
+      ctx.fillStyle = palette[b];
       for (let k = from; k < to; k++) {
         const i = items[k];
         const grow = age[i] >= GROW_TIME ? 1 : smoothstep(0, GROW_TIME, age[i]);
@@ -299,8 +515,8 @@ export class Renderer {
    * @param {number} H
    */
   drawPredators(ctx, alpha, W, H) {
-    const profile = this.sim.predatorProfile;
-    const length = profile.length;
+    const theme = this.theme;
+    const length = this.sim.predatorProfile.length;
     for (const p of this.sim.predators) {
       const rx = wrapCoord(p.prevX + wrapDelta(p.x - p.prevX, W) * alpha, W);
       const ry = wrapCoord(p.prevY + wrapDelta(p.y - p.prevY, H) * alpha, H);
@@ -316,17 +532,17 @@ export class Renderer {
         ctx.beginPath();
         traceWrapped(ctx, PREDATOR_SHAPE, rx, ry, p.hx, p.hy, kx * 1.45, ky * 1.6, radius, W, H);
         ctx.globalAlpha = striking ? 0.38 : 0.2;
-        ctx.fillStyle = profile.color;
+        ctx.fillStyle = theme.predator;
         ctx.fill();
         ctx.globalAlpha = 1;
       }
       ctx.beginPath();
       traceWrapped(ctx, PREDATOR_SHAPE, rx, ry, p.hx, p.hy, kx, ky, radius, W, H);
-      ctx.fillStyle = striking ? profile.strikeColor : p.state === 'rest' ? profile.restColor : profile.color;
+      ctx.fillStyle = striking ? theme.predatorStrike : p.state === 'rest' ? theme.predatorRest : theme.predator;
       ctx.fill();
       ctx.lineWidth = 1.25;
       ctx.lineJoin = 'round';
-      ctx.strokeStyle = striking ? profile.color : 'rgba(255, 236, 238, 0.85)';
+      ctx.strokeStyle = striking ? theme.predator : theme.predatorOutline;
       ctx.stroke();
     }
   }
@@ -353,25 +569,64 @@ export class Renderer {
         ctx.arc(cx, cy, r, 0, TAU);
       }
       ctx.lineWidth = width;
-      ctx.strokeStyle = `rgba(214, 242, 255, ${(0.6 * a).toFixed(3)})`;
+      ctx.strokeStyle = `rgba(${this.theme.pulseRgb}, ${(0.6 * a).toFixed(3)})`;
       ctx.stroke();
-      ctx.fillStyle = `rgba(160, 220, 255, ${(0.06 * a).toFixed(3)})`;
+      ctx.fillStyle = `rgba(${this.theme.pulseRgb}, ${(0.05 * a).toFixed(3)})`;
       ctx.fill();
     }
   }
 
   /**
-   * Catch flashes.
+   * Catch flashes, births, starvations.
    * @param {CanvasRenderingContext2D} ctx
    * @param {number} W
    * @param {number} H
    */
   drawEffects(ctx, W, H) {
     const offsets = this.offsets;
+    const theme = this.theme;
     for (const e of this.sim.effects) {
       const t = e.age / e.duration;
-      const r = lerp(4, 34, Math.sqrt(t));
-      const count = wrapOffsets(e.x, e.y, r + 3, W, H, offsets);
+      const fade = 1 - t;
+      let r;
+      let rgb;
+      let opacity;
+      let width;
+      let filled = false;
+      switch (e.kind) {
+        case 'catch':
+          r = lerp(4, 34, Math.sqrt(t));
+          rgb = theme.predatorRgb;
+          opacity = 0.9 * fade;
+          width = 2.5 * fade + 0.5;
+          break;
+        case 'birth':
+          r = lerp(2, 13, Math.sqrt(t));
+          rgb = theme.speciesRgb[e.species];
+          opacity = 0.75 * fade;
+          width = 1.2;
+          break;
+        case 'starve':
+          r = 4 * fade + 0.5;
+          rgb = theme.starveRgb[e.species];
+          opacity = 0.7 * fade;
+          width = 0;
+          filled = true;
+          break;
+        case 'predatorBirth':
+          r = lerp(8, 46, Math.sqrt(t));
+          rgb = theme.predatorRgb;
+          opacity = 0.7 * fade;
+          width = 2;
+          break;
+        default: // predatorStarve: implodes
+          r = lerp(26, 4, t);
+          rgb = theme.predatorRgb;
+          opacity = 0.55 * fade;
+          width = 1.5;
+          break;
+      }
+      const count = wrapOffsets(e.x, e.y, r + width, W, H, offsets);
       ctx.beginPath();
       for (let k = 0; k < count; k++) {
         const cx = e.x + offsets[2 * k];
@@ -379,14 +634,20 @@ export class Renderer {
         ctx.moveTo(cx + r, cy);
         ctx.arc(cx, cy, r, 0, TAU);
       }
-      ctx.lineWidth = 2.5 * (1 - t) + 0.5;
-      ctx.strokeStyle = `rgba(255, 90, 110, ${(0.9 * (1 - t)).toFixed(3)})`;
-      ctx.stroke();
+      const style = `rgba(${rgb}, ${opacity.toFixed(3)})`;
+      if (filled) {
+        ctx.fillStyle = style;
+        ctx.fill();
+      } else {
+        ctx.lineWidth = width;
+        ctx.strokeStyle = style;
+        ctx.stroke();
+      }
     }
   }
 
   /**
-   * Touch beacons: attractors ripple inward (teal), repulsors ripple outward (orange).
+   * Touch beacons: attractors ripple inward, repulsors ripple outward.
    * @param {CanvasRenderingContext2D} ctx
    * @param {number} time Seconds.
    */
@@ -395,7 +656,7 @@ export class Renderer {
       const a = b.level;
       if (a <= 0.01) continue;
       const attract = b.mode === 'attract';
-      const rgb = attract ? '120, 255, 214' : '255, 140, 92';
+      const rgb = attract ? this.theme.attractRgb : this.theme.repelRgb;
       const reach = attract ? BEACON.orbitRadius : 0.18 * BEACON.repelRadius;
       ctx.beginPath();
       ctx.arc(b.x, b.y, 6, 0, TAU);
@@ -458,8 +719,8 @@ export class Renderer {
       const rx = wrapCoord(prey.prevX[i] + wrapDelta(prey.x[i] - prey.prevX[i], W) * alpha, W);
       const ry = wrapCoord(prey.prevY[i] + wrapDelta(prey.y[i] - prey.prevY[i], H) * alpha, H);
       ctx.beginPath();
-      ctx.arc(rx, ry, rt.perception, 0, TAU);
-      ctx.strokeStyle = sim.species[s].color;
+      ctx.arc(rx, ry, rt.perception * prey.genePerception[i], 0, TAU);
+      ctx.strokeStyle = this.theme.species[s];
       ctx.globalAlpha = 0.5;
       ctx.stroke();
       ctx.beginPath();
@@ -468,6 +729,11 @@ export class Renderer {
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
+      // Energy bar.
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.fillRect(rx - 10, ry + 10, 20, 3);
+      ctx.fillStyle = this.theme.species[s];
+      ctx.fillRect(rx - 10, ry + 10, 20 * prey.energy[i], 3);
     }
 
     const PR = sim.predatorRuntime;
@@ -495,10 +761,13 @@ export class Renderer {
         ctx.strokeStyle = 'rgba(255, 90, 110, 0.8)';
         ctx.stroke();
       }
+      // Stamina (top) and energy (bottom) bars.
       ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-      ctx.fillRect(rx + 22, ry - 22, 44, 5);
+      ctx.fillRect(rx + 22, ry - 22, 44, 9);
       ctx.fillStyle = p.stamina > 0.3 ? '#7dffb2' : '#ff8a5c';
-      ctx.fillRect(rx + 22, ry - 22, 44 * p.stamina, 5);
+      ctx.fillRect(rx + 22, ry - 22, 44 * p.stamina, 4);
+      ctx.fillStyle = '#ffd166';
+      ctx.fillRect(rx + 22, ry - 17, 44 * Math.min(1, p.energy), 4);
       ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
       ctx.fillText(p.state, rx + 22, ry - 27);
     }

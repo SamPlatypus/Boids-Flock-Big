@@ -60,7 +60,8 @@ function huntScenario(overrides) {
 }
 
 test('predator cycles patrol → pursue → strike → catch → rest → patrol', () => {
-  const { sim, config, p } = huntScenario({ countSpecies2: 1, predatorAggression: 1 });
+  // Fixed populations: a catch respawns the prey elsewhere.
+  const { sim, config, p } = huntScenario({ countSpecies2: 1, predatorAggression: 1, ecosystem: false });
   // A lone manta ahead of the predator (isolated, slow: the ideal target).
   const m = 0;
   sim.prey.x[m] = 420;

@@ -24,6 +24,8 @@
 
 import { wrapCoord, wrapDelta } from '../core/torus.js';
 import { ForceBudget, clamp, lerp, nextSpeedLimit, truncationFactor } from '../core/math.js';
+import { DEATH } from './prey-pool.js';
+import { SPECIES_COUNT } from './species.js';
 
 /** @typedef {'patrol' | 'pursue' | 'strike' | 'rest'} PredatorState */
 /** @typedef {import('./simulation.js').Simulation} Simulation */
@@ -38,10 +40,9 @@ const EVADE_LOOKAHEAD = 0.5;
 const TARGET_STICKINESS = 0.2;
 /** A strike only launches at prey within this cone ahead (cos 40°). */
 const STRIKE_CONE_COS = Math.cos((40 * Math.PI) / 180);
-/** Rest-length multiplier after a successful catch (satiation). */
-const SATIATION = 2.5;
 /** Fraction of the force budget reserved when a speed limit drops (see flocking.js). */
 const SPEED_LIMIT_DROP = 0.5;
+const SWITCH_SCRATCH = new Float64Array(SPECIES_COUNT);
 
 export class PredatorRuntime {
   constructor() {
@@ -69,6 +70,15 @@ export class PredatorRuntime {
     this.restRegen = 0;
     this.pursuitDrain = 0;
     this.strikeDrain = 0;
+    this.catchStamina = 0;
+    /** Rest-length multiplier after a catch. */
+    this.satiation = 1;
+    /** Preference for the currently most abundant prey species. */
+    this.preySwitching = 0;
+    /** Energy burned per second at rest / extra at full pursuit speed (× energyDecay). */
+    this.metabolism = 0;
+    this.effortCost = 0;
+    this.fertility = 0;
     this.wanderStrength = 0;
     this.wanderRate = 0;
     this.wanderSigma = 0;
@@ -107,6 +117,12 @@ export class PredatorRuntime {
     this.wanderStrength = profile.wanderStrength;
     this.wanderRate = profile.wanderRate;
     this.wanderSigma = Math.sqrt(2 * profile.wanderRate);
+    this.catchStamina = profile.catchStamina;
+    this.satiation = profile.satiation;
+    this.preySwitching = profile.preySwitching;
+    this.metabolism = profile.metabolism * config.energyDecay;
+    this.effortCost = profile.effortCost * config.energyDecay;
+    this.fertility = profile.fertility;
     this.threatLevel.patrol = profile.threatLevel.patrol;
     this.threatLevel.pursue = profile.threatLevel.pursue;
     this.threatLevel.strike = profile.threatLevel.strike;
@@ -157,6 +173,9 @@ export class Predator {
     this.extX = 0;
     this.extY = 0;
     this.catches = 0;
+    /** Ecosystem energy ∈ [0, 1]: starves at 0, divides at 1. */
+    this.energy = 0.7;
+    this.generation = 0;
   }
 }
 
@@ -210,6 +229,12 @@ export function sensePredators(sim) {
   const { prey, grid, queryBuffer: buf, speciesRuntime: rt, predatorRuntime: PR, width, height } = sim;
   let maxThreat = 0;
   for (const s of rt) if (s.threatRadius > maxThreat) maxThreat = s.threatRadius;
+  // Prey switching: species more abundant than an even share are preferred
+  // (frequency-dependent predation stabilises multi-species coexistence).
+  const shares = SWITCH_SCRATCH;
+  for (let s = 0; s < shares.length; s++) {
+    shares[s] = prey.count > 0 ? PR.preySwitching * (prey.countBySpecies[s] / prey.count - 1 / shares.length) : 0;
+  }
 
   for (const p of sim.predators) {
     // Revalidate the target: indices move when prey are removed, ids never repeat.
@@ -266,7 +291,8 @@ export function sensePredators(sim) {
           d / PR.huntRadius +
           0.5 * Math.min(1, prey.crowding[j] / 10) +
           0.15 * (1 - ahead) -
-          0.35 * P.vulnerability;
+          0.35 * P.vulnerability -
+          shares[prey.species[j]];
         if (j === p.target) score -= TARGET_STICKINESS;
         if (score < bestScore) {
           bestScore = score;
@@ -328,12 +354,15 @@ function startRest(sim, p, duration) {
 function decide(sim, p) {
   const PR = sim.predatorRuntime;
   switch (p.state) {
-    case 'patrol':
-      if (p.stamina >= PR.huntThreshold && p.candidate >= 0) {
+    case 'patrol': {
+      // With the life cycle on, hunger lowers the stamina needed to start a hunt.
+      const appetite = sim.config.ecosystem ? 0.4 + 0.6 * Math.min(1, p.energy) : 1;
+      if (p.stamina >= PR.huntThreshold * appetite && p.candidate >= 0) {
         lockTarget(sim, p, p.candidate);
         transition(sim, p, 'pursue');
       }
       break;
+    }
     case 'pursue': {
       if (p.target < 0 || p.targetDist > PR.loseRadius) {
         if (p.candidate >= 0) lockTarget(sim, p, p.candidate);
@@ -483,18 +512,23 @@ export function integratePredators(sim, dt) {
     p.vy = vy;
     p.x = wrapCoord(p.x + vx * dt, width);
     p.y = wrapCoord(p.y + vy * dt, height);
-    if (p.state === 'strike') tryCatch(sim, p);
+    // Hunting predators eat prey on contact (a strike just makes contact likely).
+    if (p.state === 'strike' || p.state === 'pursue') tryCatch(sim, p);
   }
 }
 
 /**
- * During a strike, catch the nearest prey within the catch radius.
+ * Eat the nearest live prey within the contact radius. With the life cycle on
+ * the prey dies (removed in the life-cycle pass) and the predator gains its
+ * nutrition and some stamina; otherwise the prey respawns elsewhere so fixed
+ * populations stay constant.
  * @param {Simulation} sim
  * @param {Predator} p
  */
 function tryCatch(sim, p) {
   const PR = sim.predatorRuntime;
   const buf = sim.queryBuffer;
+  const prey = sim.prey;
   // Grid bins are from the start of the step; pad the search by the largest
   // per-step displacement, then test the exact radius.
   const count = sim.grid.query(p.x, p.y, PR.catchRadius + 8, -1, buf);
@@ -502,19 +536,26 @@ function tryCatch(sim, p) {
   let best = -1;
   let bestD2 = r2;
   for (let k = 0; k < count; k++) {
-    if (buf.distSq[k] < bestD2) {
+    const j = buf.index[k];
+    if (buf.distSq[k] < bestD2 && !prey.dead[j]) {
       bestD2 = buf.distSq[k];
-      best = buf.index[k];
+      best = j;
     }
   }
   if (best < 0) return;
-  const prey = sim.prey;
-  const caught = { id: prey.id[best], species: prey.species[best] };
+  const id = prey.id[best];
+  const species = prey.species[best];
   const x = prey.x[best];
   const y = prey.y[best];
   p.catches++;
-  sim.respawnPrey(best);
-  sim.events.emit('catch', { predator: p.id, prey: caught.id, species: caught.species, x, y, time: sim.time });
+  if (sim.config.ecosystem) {
+    prey.dead[best] = DEATH.eaten;
+    p.energy = Math.min(1, p.energy + sim.speciesRuntime[species].nutrition);
+    p.stamina = Math.min(1, p.stamina + PR.catchStamina);
+  } else {
+    sim.respawnPrey(best);
+  }
+  sim.events.emit('catch', { predator: p.id, prey: id, species, x, y, time: sim.time });
   sim.recordCatch(x, y);
-  startRest(sim, p, PR.minRest * SATIATION);
+  startRest(sim, p, PR.minRest * PR.satiation);
 }

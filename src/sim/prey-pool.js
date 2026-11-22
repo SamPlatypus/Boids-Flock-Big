@@ -12,6 +12,9 @@
 
 import { SPECIES_COUNT } from './species.js';
 
+/** Values of `PreyPool.dead`. */
+export const DEATH = Object.freeze({ alive: 0, eaten: 1, starved: 2 });
+
 const FLOAT_FIELDS = /** @type {const} */ ([
   'x', 'y', // position (world px, wrapped into [0, W) × [0, H))
   'vx', 'vy', // velocity (px/s)
@@ -28,6 +31,10 @@ const FLOAT_FIELDS = /** @type {const} */ ([
   'threat', // per-step direct alarm stimulus ∈ [0, 1]
   'attractX', 'attractY', // per-step attractor stimulus (dimensionless)
   'age', // seconds since spawn (render grow-in)
+  'energy', // ecosystem energy ∈ [0, 1]: starve at 0, divide at 1
+  'geneSpeed', // heritable speed multiplier (mutates on division)
+  'genePerception', // heritable perception multiplier (mutates on division)
+  'generation', // 0 for founders, parent + 1 on division
 ]);
 
 export class PreyPool {
@@ -43,6 +50,11 @@ export class PreyPool {
     this.species = new Uint8Array(0);
     /** Neighbours within perception last step (predators prefer isolated prey). */
     this.crowding = new Uint16Array(0);
+    /** Food particle this agent is grazing towards (-1 = none) and its stable id. */
+    this.foodTarget = new Int32Array(0);
+    this.foodTargetId = new Uint32Array(0);
+    /** Death marker set during a step: 0 alive, DEATH.eaten, DEATH.starved. */
+    this.dead = new Uint8Array(0);
     this.x = new Float64Array(0);
     this.y = new Float64Array(0);
     this.vx = new Float64Array(0);
@@ -67,6 +79,10 @@ export class PreyPool {
     this.attractX = new Float64Array(0);
     this.attractY = new Float64Array(0);
     this.age = new Float64Array(0);
+    this.energy = new Float64Array(0);
+    this.geneSpeed = new Float64Array(0);
+    this.genePerception = new Float64Array(0);
+    this.generation = new Float64Array(0);
     this.reserve(initialCapacity);
   }
 
@@ -91,6 +107,15 @@ export class PreyPool {
     const crowding = new Uint16Array(next);
     crowding.set(this.crowding.subarray(0, this.count));
     this.crowding = crowding;
+    const foodTarget = new Int32Array(next);
+    foodTarget.set(this.foodTarget.subarray(0, this.count));
+    this.foodTarget = foodTarget;
+    const foodTargetId = new Uint32Array(next);
+    foodTargetId.set(this.foodTargetId.subarray(0, this.count));
+    this.foodTargetId = foodTargetId;
+    const dead = new Uint8Array(next);
+    dead.set(this.dead.subarray(0, this.count));
+    this.dead = dead;
     this.capacity = next;
   }
 
@@ -113,6 +138,12 @@ export class PreyPool {
     this.id[i] = this.nextId++;
     this.species[i] = species;
     this.crowding[i] = 0;
+    this.foodTarget[i] = -1;
+    this.foodTargetId[i] = 0;
+    this.dead[i] = 0;
+    this.energy[i] = 0.6;
+    this.geneSpeed[i] = 1;
+    this.genePerception[i] = 1;
     this.x[i] = x;
     this.y[i] = y;
     this.prevX[i] = x;
@@ -143,6 +174,9 @@ export class PreyPool {
       this.id[i] = this.id[last];
       this.species[i] = this.species[last];
       this.crowding[i] = this.crowding[last];
+      this.foodTarget[i] = this.foodTarget[last];
+      this.foodTargetId[i] = this.foodTargetId[last];
+      this.dead[i] = this.dead[last];
     }
     this.count = last;
   }
