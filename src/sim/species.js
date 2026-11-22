@@ -93,7 +93,9 @@ const PROFILES = [
     mouth: 1,
     fertility: 0.2,
     capacityShare: 0.5,
-    nutrition: 0.22,
+    // Hard to catch (≈2.4 catches per predator-minute against ≈15 for mantas),
+    // so each catch must be worth more for predators to ride out manta lows.
+    nutrition: 0.3,
     length: 11,
   },
   {
@@ -172,7 +174,7 @@ const PROFILES = [
     mouth: 1.1,
     fertility: 0.25,
     capacityShare: 0.35,
-    nutrition: 0.3,
+    nutrition: 0.38, // hardest to catch of all (≈1.25 per predator-minute)
     length: 13,
   },
 ];
@@ -352,7 +354,11 @@ export const PREDATOR_PROFILE = Object.freeze({
   strikeDrain: 0.6,
   catchStamina: 0.25,
   satiation: 1.5,
-  preySwitching: 0.8,
+  // Strong switching shields rare species. Over 12 seeds × 20 min on a
+  // phone-sized world, switching 0.8 with the earlier, lower prey nutrition let
+  // predators drive mantas (their staple) so low that the predators died out
+  // 7 times; 1.2 with the nutrition above, never. 0.4 was far worse.
+  preySwitching: 1.2,
   metabolism: 0.022,
   effortCost: 0.02,
   fertility: 0.4,
