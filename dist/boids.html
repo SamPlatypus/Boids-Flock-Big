@@ -54,6 +54,17 @@
 .hud * {
   box-sizing: border-box;
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .hud button,
 .hud input {
   font: inherit;
@@ -7108,6 +7119,14 @@ class PopulationChart {
     predMax = Math.max(4, niceMax(predMax * 1.08));
     this.preyMaxLabel.textContent = `prey ≤ ${preyMax}`;
     this.predMaxLabel.textContent = `predators ≤ ${predMax}`;
+    if (n > 0) {
+      const last = (/** @type {number} */ series) => Math.round(history.at(series, n - 1));
+      canvas.setAttribute(
+        'aria-label',
+        `Population over the last 10 minutes, now ${last(0)} dartfish, ${last(1)} mantas, ` +
+          `${last(2)} foragers, ${last(3)} predators and ${last(4)} food particles`,
+      );
+    }
 
     // Grid lines.
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
@@ -7234,8 +7253,10 @@ function slider(config, key, options = {}) {
     config[key] = /** @type {never} */ (input.value);
   });
   const dispose = bind(config, key, (value) => {
+    const text = format(value);
     input.value = String(value);
-    output.textContent = format(value);
+    output.textContent = text;
+    input.setAttribute('aria-valuetext', text); // read with units, not as a bare number
     input.style.setProperty('--fill', `${((value - min) / (max - min)) * 100}%`);
   });
   return { element, dispose };
@@ -7262,7 +7283,8 @@ function toggle(config, key, options = {}) {
 }
 
 /**
- * − count + stepper. Press and hold repeats, accelerating.
+ * − count + stepper. A click steps once (pointer, keyboard and assistive
+ * technology alike); pressing and holding repeats, accelerating.
  * @param {ReactiveConfig} config
  * @param {ConfigKey} key
  * @param {{ label?: string, step: number, color?: () => string }} options
@@ -7287,6 +7309,8 @@ function stepper(config, key, options) {
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let timer;
   let repeats = 0;
+  /** A press-and-hold already stepped: the click that ends it must not step again. */
+  let held = false;
   /** @param {number} direction */
   const nudge = (direction) => {
     const factor = repeats > 12 ? 5 : repeats > 5 ? 2 : 1;
@@ -7304,8 +7328,11 @@ function stepper(config, key, options) {
     button.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       repeats = 0;
-      nudge(direction);
+      held = false;
       const repeat = () => {
+        // At the limit the button is disabled and may never see pointerup.
+        if (button.disabled) return stop();
+        held = true;
         repeats++;
         nudge(direction);
         timer = setTimeout(repeat, 70);
@@ -7314,9 +7341,14 @@ function stepper(config, key, options) {
       timer = setTimeout(repeat, 380);
     });
     for (const type of ['pointerup', 'pointerleave', 'pointercancel']) button.addEventListener(type, stop);
-    // Keyboard activation (Enter / Space) arrives as a click with detail 0.
-    button.addEventListener('click', (e) => {
-      if (e.detail === 0) nudge(direction);
+    button.addEventListener('click', () => {
+      stop();
+      if (held) {
+        held = false;
+        return;
+      }
+      repeats = 0;
+      nudge(direction);
     });
   };
   wire(minus, -1);
@@ -7527,9 +7559,19 @@ function createHud(app) {
   const fpsValue = h('b', { text: '–' });
   const boidsValue = h('b', { text: '–' });
   const predValue = h('b', { text: '–' });
+  // The name stays fixed; the live numbers go in a description, which screen
+  // readers read on focus without announcing every update.
+  const pillStatus = h('span', { class: 'sr-only', id: 'boids-pill-status' });
   const pill = h(
     'button',
-    { type: 'button', class: 'pill glass', 'aria-expanded': 'false', 'aria-controls': 'boids-drawer', 'aria-label': 'Open simulation controls' },
+    {
+      type: 'button',
+      class: 'pill glass',
+      'aria-expanded': 'false',
+      'aria-controls': 'boids-drawer',
+      'aria-label': 'Simulation controls',
+      'aria-describedby': 'boids-pill-status',
+    },
     fpsDot,
     h('span', { class: 'pill-item' }, fpsValue, h('span', { text: 'fps' })),
     h('i', { class: 'pill-sep' }),
@@ -7563,7 +7605,7 @@ function createHud(app) {
     panels,
   );
   const toasts = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
-  const root = h('div', { class: 'hud', 'data-open': 'false' }, pill, drawer, toasts);
+  const root = h('div', { class: 'hud', 'data-open': 'false' }, pill, pillStatus, drawer, toasts);
 
   /** @type {Record<string, HTMLElement>} */
   const panelById = {};
@@ -7955,6 +7997,7 @@ function createHud(app) {
     fpsDot.dataset.level = fps === 0 || fps >= 50 ? 'ok' : fps >= 30 ? 'warn' : 'bad';
     boidsValue.textContent = String(sim.prey.count);
     predValue.textContent = String(sim.predators.length);
+    pillStatus.textContent = `${sim.prey.count} boids, ${sim.predators.length} predators, ${Math.round(fps)} frames per second`;
     subtitle.textContent = `${Math.round(fps)} fps · ${sim.prey.count} boids · ${sim.predators.length} predators · ${sim.food.count} food`;
     refreshMetrics();
   }

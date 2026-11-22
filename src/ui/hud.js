@@ -91,9 +91,19 @@ export function createHud(app) {
   const fpsValue = h('b', { text: '–' });
   const boidsValue = h('b', { text: '–' });
   const predValue = h('b', { text: '–' });
+  // The name stays fixed; the live numbers go in a description, which screen
+  // readers read on focus without announcing every update.
+  const pillStatus = h('span', { class: 'sr-only', id: 'boids-pill-status' });
   const pill = h(
     'button',
-    { type: 'button', class: 'pill glass', 'aria-expanded': 'false', 'aria-controls': 'boids-drawer', 'aria-label': 'Open simulation controls' },
+    {
+      type: 'button',
+      class: 'pill glass',
+      'aria-expanded': 'false',
+      'aria-controls': 'boids-drawer',
+      'aria-label': 'Simulation controls',
+      'aria-describedby': 'boids-pill-status',
+    },
     fpsDot,
     h('span', { class: 'pill-item' }, fpsValue, h('span', { text: 'fps' })),
     h('i', { class: 'pill-sep' }),
@@ -127,7 +137,7 @@ export function createHud(app) {
     panels,
   );
   const toasts = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
-  const root = h('div', { class: 'hud', 'data-open': 'false' }, pill, drawer, toasts);
+  const root = h('div', { class: 'hud', 'data-open': 'false' }, pill, pillStatus, drawer, toasts);
 
   /** @type {Record<string, HTMLElement>} */
   const panelById = {};
@@ -519,6 +529,7 @@ export function createHud(app) {
     fpsDot.dataset.level = fps === 0 || fps >= 50 ? 'ok' : fps >= 30 ? 'warn' : 'bad';
     boidsValue.textContent = String(sim.prey.count);
     predValue.textContent = String(sim.predators.length);
+    pillStatus.textContent = `${sim.prey.count} boids, ${sim.predators.length} predators, ${Math.round(fps)} frames per second`;
     subtitle.textContent = `${Math.round(fps)} fps · ${sim.prey.count} boids · ${sim.predators.length} predators · ${sim.food.count} food`;
     refreshMetrics();
   }

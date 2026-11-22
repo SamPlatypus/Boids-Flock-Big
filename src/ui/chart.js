@@ -87,6 +87,14 @@ export class PopulationChart {
     predMax = Math.max(4, niceMax(predMax * 1.08));
     this.preyMaxLabel.textContent = `prey ≤ ${preyMax}`;
     this.predMaxLabel.textContent = `predators ≤ ${predMax}`;
+    if (n > 0) {
+      const last = (/** @type {number} */ series) => Math.round(history.at(series, n - 1));
+      canvas.setAttribute(
+        'aria-label',
+        `Population over the last 10 minutes, now ${last(0)} dartfish, ${last(1)} mantas, ` +
+          `${last(2)} foragers, ${last(3)} predators and ${last(4)} food particles`,
+      );
+    }
 
     // Grid lines.
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';

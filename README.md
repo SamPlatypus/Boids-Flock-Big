@@ -17,6 +17,8 @@ Everything is plain JavaScript ES modules with **zero runtime dependencies**. Th
 
 There is no install step: Node ≥ 20 is only needed for the dev server, tests and build scripts. `npm install` fetches TypeScript, which is used only by `npm run typecheck`.
 
+Browser support: iOS Safari 14.5+, Chrome / Edge 87+ and Firefox 78+. The glass blur needs Firefox 103+; older versions get solid panels.
+
 **Gestures**
 
 | Gesture | Effect |

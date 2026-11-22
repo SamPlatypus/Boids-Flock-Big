@@ -69,8 +69,10 @@ export function slider(config, key, options = {}) {
     config[key] = /** @type {never} */ (input.value);
   });
   const dispose = bind(config, key, (value) => {
+    const text = format(value);
     input.value = String(value);
-    output.textContent = format(value);
+    output.textContent = text;
+    input.setAttribute('aria-valuetext', text); // read with units, not as a bare number
     input.style.setProperty('--fill', `${((value - min) / (max - min)) * 100}%`);
   });
   return { element, dispose };
@@ -97,7 +99,8 @@ export function toggle(config, key, options = {}) {
 }
 
 /**
- * − count + stepper. Press and hold repeats, accelerating.
+ * − count + stepper. A click steps once (pointer, keyboard and assistive
+ * technology alike); pressing and holding repeats, accelerating.
  * @param {ReactiveConfig} config
  * @param {ConfigKey} key
  * @param {{ label?: string, step: number, color?: () => string }} options
@@ -122,6 +125,8 @@ export function stepper(config, key, options) {
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let timer;
   let repeats = 0;
+  /** A press-and-hold already stepped: the click that ends it must not step again. */
+  let held = false;
   /** @param {number} direction */
   const nudge = (direction) => {
     const factor = repeats > 12 ? 5 : repeats > 5 ? 2 : 1;
@@ -139,8 +144,11 @@ export function stepper(config, key, options) {
     button.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       repeats = 0;
-      nudge(direction);
+      held = false;
       const repeat = () => {
+        // At the limit the button is disabled and may never see pointerup.
+        if (button.disabled) return stop();
+        held = true;
         repeats++;
         nudge(direction);
         timer = setTimeout(repeat, 70);
@@ -149,9 +157,14 @@ export function stepper(config, key, options) {
       timer = setTimeout(repeat, 380);
     });
     for (const type of ['pointerup', 'pointerleave', 'pointercancel']) button.addEventListener(type, stop);
-    // Keyboard activation (Enter / Space) arrives as a click with detail 0.
-    button.addEventListener('click', (e) => {
-      if (e.detail === 0) nudge(direction);
+    button.addEventListener('click', () => {
+      stop();
+      if (held) {
+        held = false;
+        return;
+      }
+      repeats = 0;
+      nudge(direction);
     });
   };
   wire(minus, -1);
