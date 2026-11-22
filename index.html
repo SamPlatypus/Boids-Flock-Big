@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#04121d">
+  <meta name="color-scheme" content="dark">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Boids">
+  <meta name="description" content="Offline-first flocking simulation: three prey species, apex predators and touch physics.">
+  <title>Boids · Flocking Simulation</title>
+  <!-- hosted-only:start -->
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icons/icon-180.png">
+  <!-- hosted-only:end -->
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #04121d;
+      overscroll-behavior: none;
+    }
+    body {
+      position: fixed;
+      inset: 0;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #sim {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      touch-action: none;
+      background:
+        radial-gradient(120% 90% at 50% 35%, #0d3550 0%, #072235 45%, #03101b 100%);
+    }
+    #stats {
+      position: fixed;
+      left: max(10px, env(safe-area-inset-left));
+      top: max(10px, env(safe-area-inset-top));
+      margin: 0;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: rgba(205, 232, 255, 0.78);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      white-space: pre;
+      pointer-events: none;
+    }
+    noscript {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: #cde8ff;
+      font: 15px system-ui, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="sim" aria-label="Flocking simulation. Tap to scatter, press and hold to attract, two fingers to repel."></canvas>
+  <pre id="stats" hidden></pre>
+  <noscript>This simulation needs JavaScript.</noscript>
+  <!-- dev-only:start -->
+  <script>
+    // ES modules cannot load from file:// URLs, so double-clicking this file
+    // opens the single-file standalone build instead (made by `npm run build`).
+    // stop() first: halts parsing so the module script below is never requested.
+    if (location.protocol === 'file:') {
+      window.stop();
+      location.replace('./dist/boids.html');
+    }
+  </script>
+  <!-- dev-only:end -->
+  <script type="module" src="./src/main.js"></script>
+  <!-- hosted-only:start -->
+  <script>
+    // Offline-first: cache the app shell once it has been opened over http(s).
+    if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+      addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+    }
+  </script>
+  <!-- hosted-only:end -->
+</body>
+</html>

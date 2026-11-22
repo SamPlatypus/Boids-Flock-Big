@@ -1,0 +1,19 @@
+{
+  // Type-checks the plain JavaScript sources via their JSDoc annotations.
+  // Nothing is compiled: the browser runs src/ as-is.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["src/**/*.js", "src/**/*.d.ts"]
+}
