@@ -10,10 +10,11 @@ Everything is plain JavaScript ES modules with **zero runtime dependencies**. Th
 
 | How | Command / action |
 | --- | --- |
+| Online | <https://samplatypus.github.io/Boids-Flock-Big/>: after the first visit it works offline, and *Add to Home Screen* installs it as an app |
 | Single file, no server | Open `dist/boids.html` (or `index.html`, which forwards to it from disk). HTML, CSS and JS are all inline: nothing is fetched, so it works offline |
 | Local dev server | `npm start` → <http://localhost:8080> |
 | Test on a phone on the same Wi-Fi | `npm run start:lan`, then open the printed `Network:` URL |
-| Installable / offline web app | Serve over HTTPS (e.g. GitHub Pages). After the first visit it works offline and can be added to the home screen |
+| Your own copy | Serve the folder over HTTPS. `npm run site` assembles exactly the files to publish in `_site/` |
 
 There is no install step: Node ≥ 20 is only needed for the dev server, tests and build scripts. `npm install` fetches TypeScript, which is used only by `npm run typecheck`.
 
@@ -292,8 +293,10 @@ src/input/               multi-touch gestures → simulation API
 src/ui/                  glass HUD: pill + drawer, schema-bound controls, population chart, styles
 sw.js, manifest.webmanifest, icons/   offline-first PWA shell
 dist/boids.html          generated single-file build (all JS and CSS inline; runs from file://)
-scripts/                 serve.mjs (dev server) · build.mjs (zero-dependency bundler) · bench.mjs
+scripts/                 serve.mjs (dev server) · build.mjs (zero-dependency bundler) · site.mjs (Pages
+                         site assembly) · bench.mjs
 test/                    node:test suites (run headless, no browser needed)
+.github/workflows/       CI: type-check and test every push; deploy the default branch to GitHub Pages
 ```
 
 ## Development
@@ -305,8 +308,13 @@ npm test            # 57 tests: torus maths, spatial hash vs brute force, config
                     # energetics, rescue, food), presets, palettes, persistence, PWA + build freshness
 npm run typecheck   # strict TypeScript checking of the JSDoc-annotated sources (needs npm install)
 npm run build       # regenerate dist/boids.html (a test fails if it is stale)
+npm run site        # assemble the GitHub Pages site in _site/
 npm run bench       # headless performance benchmark
 ```
+
+### Deployment
+
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) type-checks and tests every push and pull request. On the default branch it then publishes to GitHub Pages. `npm run site` assembles `_site/`, which holds the hosted app with its service worker, manifest and icons, plus `dist/boids.html`. The script fails if any file the service worker precaches is missing, because a single missing file would stop offline mode from working. `actions/deploy-pages` then publishes the folder. For this to work, the repository's Settings → Pages → Source must be set to *GitHub Actions*.
 
 Notes for contributors:
 
