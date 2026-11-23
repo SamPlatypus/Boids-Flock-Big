@@ -15,7 +15,9 @@
  * - 'update': a newer version is saved and waiting. It starts the next time
  *   the app opens, or now through applyUpdate() (reloads the page).
  * - 'dev': the development server, where offline saving is off.
- * - 'error': the service worker could not be registered.
+ * - 'error': the app could not be saved this time (registration failed, or
+ *   the first download was interrupted or corrupted). It retries the next
+ *   time the app opens online.
  *
  * @module offline
  */
@@ -101,6 +103,12 @@ export function startOffline() {
             if (worker.state === 'installed' && container.controller) {
               status.nextVersion = (await ask(worker))?.version ?? null;
               status.state = 'update';
+              emit();
+            }
+            // The first save failed (connection lost, corrupted file). A
+            // failed update needs no notice: the saved version keeps running.
+            if (worker.state === 'redundant' && !registration.active) {
+              status.state = 'error';
               emit();
             }
           });

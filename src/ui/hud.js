@@ -677,7 +677,7 @@ export function createHud(app, offline) {
         : 'You’re offline. Boids is running from the copy saved on this device.',
       update: 'A new version is saved. It starts next time you open Boids, or restart now (settings are kept).',
       dev: 'Offline saving is off on the development server (npm run preview tests it).',
-      error: 'Couldn’t save Boids for offline use. It still works while online.',
+      error: 'Couldn’t save Boids for offline use this time. It tries again the next time you open it online.',
     };
     setText(offlineText, text[status.state]);
     offlineDot.dataset.state = status.state === 'ready' || status.state === 'update' ? 'ok' : status.state === 'saving' ? 'busy' : 'off';

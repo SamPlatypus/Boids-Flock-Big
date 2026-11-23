@@ -6890,7 +6890,9 @@ const __module24 = (() => {
  * - 'update': a newer version is saved and waiting. It starts the next time
  *   the app opens, or now through applyUpdate() (reloads the page).
  * - 'dev': the development server, where offline saving is off.
- * - 'error': the service worker could not be registered.
+ * - 'error': the app could not be saved this time (registration failed, or
+ *   the first download was interrupted or corrupted). It retries the next
+ *   time the app opens online.
  *
  * @module offline
  */
@@ -6976,6 +6978,12 @@ function startOffline() {
             if (worker.state === 'installed' && container.controller) {
               status.nextVersion = (await ask(worker))?.version ?? null;
               status.state = 'update';
+              emit();
+            }
+            // The first save failed (connection lost, corrupted file). A
+            // failed update needs no notice: the saved version keeps running.
+            if (worker.state === 'redundant' && !registration.active) {
+              status.state = 'error';
               emit();
             }
           });
@@ -8433,7 +8441,7 @@ function createHud(app, offline) {
         : 'You’re offline. Boids is running from the copy saved on this device.',
       update: 'A new version is saved. It starts next time you open Boids, or restart now (settings are kept).',
       dev: 'Offline saving is off on the development server (npm run preview tests it).',
-      error: 'Couldn’t save Boids for offline use. It still works while online.',
+      error: 'Couldn’t save Boids for offline use this time. It tries again the next time you open it online.',
     };
     setText(offlineText, text[status.state]);
     offlineDot.dataset.state = status.state === 'ready' || status.state === 'update' ? 'ok' : status.state === 'saving' ? 'busy' : 'off';
