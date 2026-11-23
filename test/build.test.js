@@ -15,7 +15,7 @@ test('the standalone build is a single self-contained classic script', async () 
   const html = await buildStandalone();
   assert.ok(!/<script[^>]*type="module"/.test(html), 'no module scripts');
   assert.ok(!/(?:src|href)="\.\/src\//.test(html), 'nothing loaded from src/');
-  assert.ok(!html.includes('dist/boids.html'), 'dev-only file:// redirect stripped');
+  assert.ok(!/location\.replace\(\s*['"]\.\/dist\/boids\.html/.test(html), 'dev-only file:// redirect stripped');
   assert.ok(!html.includes('serviceWorker'), 'hosted-only service worker registration stripped');
   assert.ok(!html.includes('manifest.webmanifest'), 'hosted-only manifest link stripped');
   assert.ok(!/<link[^>]+stylesheet/.test(html), 'stylesheets inlined');

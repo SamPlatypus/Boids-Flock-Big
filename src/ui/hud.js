@@ -32,6 +32,7 @@ const ICONS = Object.freeze({
   chaos: 'M13 2L4 14h7l-1 8 9-12h-7l1-8z',
   balance: 'M21 12a9 9 0 0 1-15.5 6.2M3 12a9 9 0 0 1 15.5-6.2M18 2v4h-4M6 22v-4h4',
   zen: 'M2 9c3-3 5-3 8 0s5 3 8 0M2 15c3-3 5-3 8 0s5 3 8 0',
+  install: 'M12 4v11M7 10l5 5 5-5M5 20h14',
 });
 
 const TABS = /** @type {const} */ ([
@@ -56,6 +57,7 @@ function setText(element, text) {
 const COLOR_FOR_SPECIES = /** @type {const} */ (['colorSpecies1', 'colorSpecies2', 'colorSpecies3']);
 const TAB_STORAGE_KEY = 'boids:ui:tab';
 const HINT_STORAGE_KEY = 'boids:ui:hint-seen';
+const INSTALL_TIP_STORAGE_KEY = 'boids:ui:install-tip-seen';
 
 /**
  * @param {string} key
@@ -128,12 +130,14 @@ export function createHud(app) {
   const subtitle = h('span');
   const pauseIcon = h('span');
   const pauseButton = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Pause simulation' }, pauseIcon);
+  const installHeadButton = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Install app', hidden: true }, icon(ICONS.install));
   const closeButton = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close controls' }, icon(ICONS.close));
   const grab = h('div', { class: 'drawer-grab', 'aria-hidden': 'true' });
   const head = h(
     'header',
     { class: 'drawer-head' },
     h('div', { class: 'drawer-title' }, h('strong', { text: 'Boids' }), subtitle),
+    installHeadButton,
     pauseButton,
     closeButton,
   );
@@ -148,7 +152,9 @@ export function createHud(app) {
     panels,
   );
   const toasts = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
-  const root = h('div', { class: 'hud', 'data-open': 'false' }, pill, pillStatus, drawer, toasts);
+  // Shown above the pill when the browser offers installation (hidden while the drawer is open).
+  const installChip = h('button', { type: 'button', class: 'install-chip glass', hidden: true }, icon(ICONS.install), h('span', { text: 'Install app' }));
+  const root = h('div', { class: 'hud', 'data-open': 'false' }, installChip, pill, pillStatus, drawer, toasts);
 
   /** @type {Record<string, HTMLElement>} */
   const panelById = {};
@@ -305,10 +311,22 @@ export function createHud(app) {
   pauseAction.addEventListener('click', () => {
     config.paused = !config.paused;
   });
+  // Install as an app (hosted page only: the single-file build has no manifest).
+  const installButton = h('button', { type: 'button', class: 'btn primary', text: 'Install app', hidden: true });
+  const installNote = h('p', { class: 'install-note' });
+  const downloadLink = h('a', { class: 'btn', href: './dist/boids.html', download: 'boids.html', text: 'Download file' });
+  downloadLink.title = 'The whole app as one HTML file that runs offline from anywhere';
+  const appSection = h(
+    'div',
+    { class: 'section' },
+    h('h3', { class: 'section-title', text: 'App' }),
+    h('div', { class: 'card install-card' }, installNote, h('div', { class: 'actions two' }, installButton, downloadLink)),
+  );
   panelById.scenes.append(
     h('div', { class: 'section' }, h('h3', { class: 'section-title', text: 'Scenarios' }), scenarioGrid),
     h('div', { class: 'section' }, h('h3', { class: 'section-title', text: 'World' }), h('div', { class: 'actions' }, pauseAction, respawn, resetAll)),
     section('Time', use(slider(config, 'timeScale'))),
+    appSection,
   );
 
   // ── Style tab ────────────────────────────────────────────────────────────
@@ -434,6 +452,7 @@ export function createHud(app) {
   const isolate = (/** @type {Event} */ e) => e.stopPropagation();
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'touchstart', 'touchmove', 'touchend', 'wheel', 'contextmenu', 'click']) {
     pill.addEventListener(type, isolate, { passive: true });
+    installChip.addEventListener(type, isolate, { passive: true });
     drawer.addEventListener(type, isolate, { passive: true });
   }
   root.addEventListener('keydown', (e) => {
@@ -445,7 +464,11 @@ export function createHud(app) {
   /** @type {Map<string, number>} */
   const recentToasts = new Map();
   /** @param {string} message */
-  function toast(message) {
+  /**
+   * @param {string} message
+   * @param {number} [duration] ms on screen
+   */
+  function toast(message, duration = 2600) {
     const now = performance.now();
     if ((recentToasts.get(message) ?? -Infinity) > now - 2500) return;
     recentToasts.set(message, now);
@@ -455,7 +478,7 @@ export function createHud(app) {
     setTimeout(() => {
       el.classList.add('leaving');
       setTimeout(() => el.remove(), 300);
-    }, 2600);
+    }, duration);
   }
   cleanups.push(
     sim.on('immigration', (e) => {
@@ -551,6 +574,75 @@ export function createHud(app) {
     refreshMetrics();
   }
   const interval = setInterval(update, 250);
+
+  // ── Install (PWA) ─────────────────────────────────────────────────────────
+  const hosted = location.protocol.startsWith('http') && document.querySelector('link[rel="manifest"]') !== null;
+  const nav = /** @type {Navigator & { standalone?: boolean }} */ (navigator);
+  const appleTouch = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const installed = () =>
+    nav.standalone === true || ['standalone', 'fullscreen', 'minimal-ui'].some((mode) => matchMedia(`(display-mode: ${mode})`).matches);
+  /**
+   * The browser's deferred install prompt (Chromium: Android, desktop Chrome
+   * and Edge). Its default mini-infobar is left alone; this adds a button.
+   * @type {(Event & { prompt: () => Promise<unknown>, userChoice: Promise<{ outcome: string }> }) | null}
+   */
+  let installPrompt = null;
+  let installedThisSession = false;
+  function reflectInstall() {
+    appSection.hidden = !hosted;
+    const canPrompt = hosted && installPrompt !== null && !installed();
+    installButton.hidden = !canPrompt;
+    installHeadButton.hidden = !canPrompt;
+    installChip.hidden = !canPrompt;
+    let note;
+    if (installed()) note = 'Installed: Boids runs full screen and works offline.';
+    else if (installedThisSession) note = 'Installed: open Boids from your home screen or app list.';
+    else if (canPrompt) note = 'Install Boids as an app: full screen, works offline, no app store needed.';
+    else if (appleTouch) note = 'To install on iPhone or iPad: tap the Share button, then “Add to Home Screen”.';
+    else note = 'To install: open your browser menu and choose “Install app” or “Add to Home screen”.';
+    setText(installNote, note);
+  }
+  async function install() {
+    const prompt = installPrompt;
+    if (!prompt) return;
+    installPrompt = null; // a prompt can only be shown once
+    reflectInstall();
+    try {
+      await prompt.prompt();
+      const choice = await prompt.userChoice;
+      if (choice.outcome === 'accepted') toast('Installing Boids…');
+    } catch {
+      // The browser refused to show the prompt; the menu still offers installation.
+    }
+  }
+  installButton.addEventListener('click', install);
+  installHeadButton.addEventListener('click', install);
+  installChip.addEventListener('click', install);
+  /** @param {Event} e */
+  const onBeforeInstall = (e) => {
+    // Our own chip and buttons replace the browser's default install banner.
+    e.preventDefault();
+    installPrompt = /** @type {typeof installPrompt} */ (e);
+    reflectInstall();
+  };
+  const onInstalled = () => {
+    installPrompt = null;
+    installedThisSession = true;
+    reflectInstall();
+    toast('Installed: open Boids from your home screen or app list');
+  };
+  addEventListener('beforeinstallprompt', onBeforeInstall);
+  addEventListener('appinstalled', onInstalled);
+  cleanups.push(() => {
+    removeEventListener('beforeinstallprompt', onBeforeInstall);
+    removeEventListener('appinstalled', onInstalled);
+  });
+  reflectInstall();
+  // iOS has no install prompt: explain it once, after the first-run hint.
+  if (hosted && appleTouch && !installed() && !readStorage(INSTALL_TIP_STORAGE_KEY)) {
+    setTimeout(() => toast('Install Boids: tap Share, then “Add to Home Screen”', 6000), 4500);
+    writeStorage(INSTALL_TIP_STORAGE_KEY, '1');
+  }
 
   // ── Mount ────────────────────────────────────────────────────────────────
   selectTab(TABS.some((t) => t.id === readStorage(TAB_STORAGE_KEY)) ? /** @type {string} */ (readStorage(TAB_STORAGE_KEY)) : 'eco');

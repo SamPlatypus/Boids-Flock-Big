@@ -4,8 +4,8 @@
  * (default `_site/`).
  *
  * It contains the hosted app (index.html, the ES modules, the service worker,
- * the manifest and icons) plus the single-file build at dist/boids.html. Tests,
- * scripts and package files stay out.
+ * the manifest, icons and the install-dialog screenshots) plus the single-file
+ * build at dist/boids.html. Tests, scripts and package files stay out.
  *
  * Fails if any file the service worker precaches is missing from the output:
  * one missing entry stops the worker from installing, and the app from
@@ -16,7 +16,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const ENTRIES = ['index.html', 'sw.js', 'manifest.webmanifest', 'icons', 'src', 'dist'];
+const ENTRIES = ['index.html', 'sw.js', 'manifest.webmanifest', 'icons', 'screenshots', 'src', 'dist'];
 /** Marks a directory as this script's output (hidden files are not uploaded to Pages). */
 const MARKER = '.boids-site';
 

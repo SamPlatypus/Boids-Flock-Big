@@ -32,8 +32,17 @@ test('the service worker precaches every module and stylesheet, and every precac
   }
 });
 
-test('every icon referenced by the manifest exists', async () => {
+test('every icon and screenshot referenced by the manifest exists', async () => {
   const manifest = JSON.parse(await readFile(join(ROOT, 'manifest.webmanifest'), 'utf8'));
   assert.ok(manifest.icons.length >= 3);
   for (const icon of manifest.icons) await assert.doesNotReject(access(join(ROOT, icon.src)), `${icon.src} missing`);
+  // Richer install dialogs: phones show the narrow screenshots, desktops the wide ones.
+  const factors = new Set(manifest.screenshots.map((/** @type {{ form_factor: string }} */ s) => s.form_factor));
+  assert.deepEqual([...factors].sort(), ['narrow', 'wide']);
+  for (const shot of manifest.screenshots) {
+    await assert.doesNotReject(access(join(ROOT, shot.src)), `${shot.src} missing`);
+    const [w, h] = shot.sizes.split('x').map(Number);
+    assert.ok(Math.max(w, h) / Math.min(w, h) <= 2.3, `${shot.src}: aspect ratio too extreme for install dialogs`);
+  }
+  assert.equal(manifest.id, './');
 });

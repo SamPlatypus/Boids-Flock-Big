@@ -20,6 +20,20 @@ There is no install step: Node ≥ 20 is only needed for the dev server, tests a
 
 Browser support: iOS Safari 14.5+, Chrome / Edge 87+ and Firefox 78+. The glass blur needs Firefox 103+; older versions get solid panels.
 
+## Install it as an app
+
+Boids is a progressive web app (PWA). Installed, it opens full screen from your home screen or app list and works completely offline. There's no app store and no account.
+
+| Device | How |
+| --- | --- |
+| Android: Chrome, Edge, Samsung Internet | Open the site and tap **Install app** above the status pill (also in the controls under Scenes → App). Or use the browser menu ⋮ → *Install app* / *Add to Home screen* |
+| iPhone / iPad | Open the site in Safari, tap **Share**, then **Add to Home Screen**. On iOS 16.4 and later, Chrome and Edge offer it in their share menu too |
+| Windows, macOS, Linux: Chrome, Edge | Click **Install app** in the page, or the install icon in the address bar |
+| Mac: Safari 17+ | **File → Add to Dock** |
+| Anything else | **Download file** (Scenes → App) saves the whole app as one HTML file that runs offline |
+
+Once installed, the app updates itself when it's online. After the first visit, every file it needs is cached. The install dialogs on Android and desktop show the screenshots listed in the manifest.
+
 **Gestures**
 
 | Gesture | Effect |
