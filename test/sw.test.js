@@ -10,7 +10,9 @@ const ROOT = new URL('..', import.meta.url);
 const SOURCE = await readFile(new URL('sw.js', ROOT), 'utf8');
 const SCOPE = 'https://example.test/app/';
 const FILES = [...SOURCE.matchAll(/^ {2}'\.\/([^']+)': '[^']+',$/gm)].map((m) => m[1]);
-const VERSION = /const VERSION = '([^']+)'/.exec(SOURCE)?.[1];
+const VERSION = /const VERSION = '([^']+)'/.exec(SOURCE)?.[1] ?? '';
+const CACHE = `boids-frozen-${VERSION}`;
+const MARKER = 'boids-installed';
 
 class FakeCache {
   /** @type {Map<string, Response>} */
@@ -37,6 +39,10 @@ class FakeCacheStorage {
     if (!this.caches.has(name)) this.caches.set(name, new FakeCache());
     return /** @type {FakeCache} */ (this.caches.get(name));
   }
+  /** @param {string} name */
+  async has(name) {
+    return this.caches.has(name);
+  }
   async keys() {
     return [...this.caches.keys()];
   }
@@ -48,7 +54,7 @@ class FakeCacheStorage {
 
 /**
  * The network: serves the repository (the deployed site) and records requests.
- * @param {{ offline?: boolean, tamper?: string }} [options]
+ * @param {{ tamper?: string }} [options]
  */
 function network(options = {}) {
   /** @type {{ url: string, cache?: string }[]} */
@@ -60,7 +66,6 @@ function network(options = {}) {
   const fetch = async (input, init = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.url);
     requests.push({ url: url.href, cache: init.cache });
-    if (options.offline) throw new TypeError('Failed to fetch');
     const path = url.pathname.replace('/app/', '') || 'index.html';
     try {
       let body = await readFile(new URL(path, ROOT));
@@ -75,15 +80,16 @@ function network(options = {}) {
 }
 
 /**
- * Load sw.js into a fresh simulated worker.
+ * Load sw.js (optionally a variant of it) into a fresh simulated worker.
  * @param {{ fetch: Function }} net
- * @param {FakeCacheStorage} [caches]
+ * @param {{ caches?: FakeCacheStorage, source?: string, active?: boolean }} [options]
  */
-function worker(net, caches = new FakeCacheStorage()) {
+function worker(net, { caches = new FakeCacheStorage(), source = SOURCE, active = false } = {}) {
   /** @type {Record<string, (event: any) => void>} */
   const listeners = {};
   const self = {
     location: new URL('sw.js', SCOPE),
+    registration: { active: active ? {} : null },
     skipped: false,
     claimed: false,
     /** @param {string} type @param {(event: any) => void} listener */
@@ -101,141 +107,135 @@ function worker(net, caches = new FakeCacheStorage()) {
     },
   };
   const context = vm.createContext({ self, caches, fetch: net.fetch, crypto: webcrypto, btoa, URL, Response, Map, Uint8Array, String, Error, Promise, Object });
-  vm.runInContext(SOURCE, context);
+  vm.runInContext(source, context);
   /** Dispatch an extendable event and wait for its work. */
   const fire = async (/** @type {string} */ type, /** @type {any} */ event = {}) => {
     /** @type {Promise<unknown>[]} */
     const work = [];
     event.waitUntil = (/** @type {Promise<unknown>} */ promise) => work.push(promise);
-    event.respondWith = (/** @type {Promise<Response>} */ promise) => (event.response = promise);
     listeners[type](event);
     await Promise.all(work);
     return event;
   };
-  /** Fetch through the worker; resolves with the response and finished background work. */
-  const get = async (/** @type {string} */ path, mode = 'cors') => {
-    /** @type {Promise<unknown>[]} */
-    const work = [];
-    const event = {
-      request: { url: new URL(path, SCOPE).href, method: 'GET', mode },
-      /** @type {Promise<Response> | undefined} */
-      response: undefined,
+  /** A request from the page, answered by the worker. */
+  const get = async (/** @type {string} */ url, { mode = 'cors', method = 'GET' } = {}) => {
+    /** @type {Promise<Response> | undefined} */
+    let response;
+    listeners.fetch({
+      request: { url: new URL(url, SCOPE).href, method, mode },
       respondWith(/** @type {Promise<Response>} */ promise) {
-        this.response = promise;
+        response = promise;
       },
-      waitUntil(/** @type {Promise<unknown>} */ promise) {
-        work.push(promise);
-      },
-    };
-    listeners.fetch(event);
-    const response = await event.response;
-    await Promise.all(work);
-    return response;
+    });
+    assert.ok(response, 'every request is answered by the worker');
+    return /** @type {Promise<Response>} */ (response);
   };
   return { self, caches, fire, get };
 }
 
+/** A device where this version was saved and activated. */
+async function installed() {
+  const net = network();
+  const sw = worker(net);
+  await sw.fire('install');
+  await sw.fire('activate');
+  net.requests.length = 0;
+  return { net, sw };
+}
+
 test('sw.js lists the whole app with a version', () => {
-  assert.match(VERSION ?? '', /^[0-9a-f]{10}$/);
+  assert.match(VERSION, /^[0-9a-f]{10}$/);
   for (const file of ['index.html', 'manifest.webmanifest', 'dist/boids.html', 'src/main.js', 'src/offline.js', 'src/ui/ui.css', 'icons/icon-192.png']) {
-    assert.ok(FILES.includes(file), `${file} is saved for offline use`);
+    assert.ok(FILES.includes(file), `${file} is saved`);
   }
-  assert.ok(!FILES.some((f) => f.startsWith('screenshots/')), 'install-dialog screenshots stay online-only');
 });
 
-test('install saves every file of the version, verified and bypassing the HTTP cache', async () => {
+test('the first visit saves every file, verified, and freezes the device at this version', async () => {
   const net = network();
   const sw = worker(net);
   await sw.fire('install');
-  const cache = sw.caches.caches.get(`boids-${VERSION}`);
-  assert.ok(cache, 'a cache named after the version');
-  assert.equal(cache.entries.size, FILES.length);
+  const cache = sw.caches.caches.get(CACHE);
+  assert.equal(cache?.entries.size, FILES.length);
   assert.ok(net.requests.every((r) => r.cache === 'reload'), 'downloads bypass the HTTP cache');
-  // Stored without the (already decoded) content encoding.
-  const page = /** @type {Response} */ (await cache.match(new URL('index.html', SCOPE).href));
-  assert.equal(page.headers.get('Content-Encoding'), null);
-  assert.equal(page.headers.get('Content-Type'), 'text/html');
-});
-
-test('a version is saved completely or not at all', async () => {
-  const caches = new FakeCacheStorage();
-  const broken = worker(network({ tamper: 'src/sim/flocking.js' }), caches);
-  await assert.rejects(broken.fire('install'), /does not match version/);
-  // A retry (e.g. after the CDN caught up) only downloads what is still missing.
-  const net = network();
-  await worker(net, caches).fire('install');
-  assert.deepEqual(net.requests.map((r) => r.url), [new URL('src/sim/flocking.js', SCOPE).href]);
-  assert.equal(caches.caches.get(`boids-${VERSION}`)?.entries.size, FILES.length);
-});
-
-test('the app runs from the saved copy: online it never waits for the network', async () => {
-  const net = network();
-  const sw = worker(net);
-  await sw.fire('install');
+  const page = /** @type {Response} */ (await cache?.match(new URL('index.html', SCOPE).href));
+  assert.equal(page.headers.get('Content-Encoding'), null, 'stored decoded, without the transfer encoding');
+  assert.equal(sw.self.skipped, false, 'a first install needs no takeover');
   await sw.fire('activate');
-  net.requests.length = 0;
-  for (const path of ['', '?countSpecies1=50&seed=3', 'index.html', 'src/main.js', 'src/ui/ui.css', 'dist/boids.html']) {
-    const response = await sw.get(path, path === 'src/main.js' || path.endsWith('.css') ? 'cors' : 'navigate');
-    assert.equal(response.status, 200, path);
-  }
-  assert.equal(net.requests.length, 0, 'no request reached the network');
-  const shell = await (await sw.get('?debug=1', 'navigate')).text();
-  assert.match(shell, /<canvas id="sim"/, 'the start URL with parameters is the app');
-});
-
-test('offline: unknown in-app pages show the app; other files fail cleanly', async () => {
-  const caches = new FakeCacheStorage();
-  const online = worker(network(), caches);
-  await online.fire('install');
-  const offline = worker(network({ offline: true }), caches);
-  assert.match(await (await offline.get('some/old/link', 'navigate')).text(), /<canvas id="sim"/);
-  await assert.rejects(offline.get('screenshots/wide-zen.jpg'));
-});
-
-test('files outside the app go to the network', async () => {
-  const net = network();
-  const sw = worker(net);
-  await sw.fire('install');
-  net.requests.length = 0;
-  await sw.get('screenshots/wide-zen.jpg');
-  assert.deepEqual(net.requests.map((r) => r.url), [new URL('screenshots/wide-zen.jpg', SCOPE).href]);
-});
-
-test('a file missing from the saved copy is repaired when it is the right version', async () => {
-  const net = network();
-  const sw = worker(net);
-  await sw.fire('install');
-  const cache = /** @type {FakeCache} */ (sw.caches.caches.get(`boids-${VERSION}`));
-  const url = new URL('src/sim/food.js', SCOPE).href;
-  cache.entries.delete(url);
-  assert.equal((await sw.get('src/sim/food.js')).status, 200);
-  assert.ok(cache.entries.has(url), 'put back');
-  // A newer file from the network is served but not mixed into the saved version.
-  const tampered = worker(network({ tamper: 'src/sim/food.js' }), sw.caches);
-  cache.entries.delete(url);
-  assert.equal((await tampered.get('src/sim/food.js')).status, 200);
-  assert.ok(!cache.entries.has(url), 'not stored: it is not this version');
-});
-
-test('activation removes only this app’s older versions', async () => {
-  const caches = new FakeCacheStorage();
-  await caches.open('boids-0123456789');
-  await caches.open('boids-v2');
-  await caches.open('another-app-on-this-origin');
-  const sw = worker(network(), caches);
-  await sw.fire('install');
-  await sw.fire('activate');
-  assert.deepEqual((await caches.keys()).sort(), ['another-app-on-this-origin', `boids-${VERSION}`]);
+  const marker = await (await sw.caches.open(MARKER)).match(new URL('installed-version', SCOPE).href);
+  assert.equal(await marker?.text(), VERSION);
   assert.ok(sw.self.claimed);
 });
 
-test('the page can ask for the version and switch to a waiting update', async () => {
+test('a corrupted first download is not saved; a retry fetches only what is missing', async () => {
+  const caches = new FakeCacheStorage();
+  await assert.rejects(worker(network({ tamper: 'src/sim/flocking.js' }), { caches }).fire('install'), /does not match version/);
+  const net = network();
+  await worker(net, { caches }).fire('install');
+  assert.deepEqual(net.requests.map((r) => r.url), [new URL('src/sim/flocking.js', SCOPE).href]);
+});
+
+test('zero updates: a different version refuses to install without downloading anything', async () => {
+  const { sw } = await installed();
+  const next = network();
+  const newer = worker(next, { caches: sw.caches, active: true, source: SOURCE.replace(`const VERSION = '${VERSION}'`, "const VERSION = 'ffffffffff'") });
+  await assert.rejects(newer.fire('install'), /frozen at version/);
+  assert.equal(next.requests.length, 0, 'not a single file downloaded');
+  assert.equal(newer.self.skipped, false);
+  assert.ok(sw.caches.caches.has(CACHE), 'the frozen version is untouched');
+});
+
+test('a device on an earlier, updating build moves to this one once, immediately', async () => {
+  const caches = new FakeCacheStorage();
+  await caches.open('boids-v2'); // network-first build
+  await caches.open('boids-0123456789'); // cache-first, updating build
+  await caches.open('another-app-on-this-origin');
+  const sw = worker(network(), { caches, active: true });
+  await sw.fire('install');
+  assert.equal(sw.self.skipped, true, 'takes over at once, so the network-using build stops');
+  await sw.fire('activate');
+  assert.deepEqual((await caches.keys()).sort(), ['another-app-on-this-origin', MARKER, CACHE].sort());
+});
+
+test('every request is answered from the device; none reaches the network', async () => {
+  const { net, sw } = await installed();
+  for (const [path, mode] of [
+    ['', 'navigate'],
+    ['?countSpecies1=50&seed=3', 'navigate'],
+    ['index.html', 'navigate'],
+    ['src/main.js', 'cors'],
+    ['src/ui/ui.css', 'no-cors'],
+    ['manifest.webmanifest', 'cors'],
+    ['icons/icon-512.png', 'no-cors'],
+    ['dist/boids.html', 'navigate'],
+  ]) {
+    assert.equal((await sw.get(path, { mode })).status, 200, path);
+  }
+  assert.match(await (await sw.get('some/old/link', { mode: 'navigate' })).text(), /<canvas id="sim"/, 'in-app links show the app');
+  for (const [url, options] of /** @type {[string, { mode?: string, method?: string }][]} */ ([
+    ['screenshots/wide-zen.jpg', {}],
+    ['not-part-of-the-app.js', {}],
+    ['https://elsewhere.example/tracker.js', {}],
+    ['index.html', { method: 'POST' }],
+  ])) {
+    assert.equal((await sw.get(url, options)).type, 'error', `${url} gets an error, not the network`);
+  }
+  assert.equal(net.requests.length, 0, 'zero network requests');
+});
+
+test('if the browser deleted the saved copy, the app explains instead of going online', async () => {
+  const { net, sw } = await installed();
+  sw.caches.caches.get(CACHE)?.entries.clear();
+  const page = await sw.get('', { mode: 'navigate' });
+  assert.equal(page.status, 503);
+  assert.match(await page.text(), /clear this site’s data/);
+  assert.equal((await sw.get('src/main.js')).type, 'error');
+  assert.equal(net.requests.length, 0);
+});
+
+test('the page can ask which version is saved', async () => {
   const sw = worker(network());
   /** @type {unknown[]} */
   const replies = [];
   await sw.fire('message', { data: { type: 'STATUS' }, ports: [{ postMessage: (/** @type {unknown} */ m) => replies.push(m) }] });
   assert.deepEqual(JSON.parse(JSON.stringify(replies)), [{ version: VERSION, files: FILES.length }]);
-  assert.equal(sw.self.skipped, false, 'an update waits by default');
-  await sw.fire('message', { data: { type: 'SKIP_WAITING' }, ports: [] });
-  assert.equal(sw.self.skipped, true);
 });

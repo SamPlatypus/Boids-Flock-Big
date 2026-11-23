@@ -39,35 +39,5 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ],
-  "screenshots": [
-    {
-      "src": "screenshots/narrow-ecosystem.jpg",
-      "sizes": "1080x1920",
-      "type": "image/jpeg",
-      "form_factor": "narrow",
-      "label": "Three prey species school, graze and flee from apex predators"
-    },
-    {
-      "src": "screenshots/narrow-controls.jpg",
-      "sizes": "1080x1920",
-      "type": "image/jpeg",
-      "form_factor": "narrow",
-      "label": "Live population chart, species energy and evolving genes"
-    },
-    {
-      "src": "screenshots/wide-zen.jpg",
-      "sizes": "1920x1080",
-      "type": "image/jpeg",
-      "form_factor": "wide",
-      "label": "Zen Drift: slow manta ribbons with glowing trails"
-    },
-    {
-      "src": "screenshots/wide-controls.jpg",
-      "sizes": "1920x1080",
-      "type": "image/jpeg",
-      "form_factor": "wide",
-      "label": "Predator Chaos on the Cyberpunk Radar palette, with the style controls"
-    }
   ]
 }

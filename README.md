@@ -10,7 +10,7 @@ Everything is plain JavaScript ES modules with **zero runtime dependencies**. Th
 
 | How | Command / action |
 | --- | --- |
-| Online | <https://samplatypus.github.io/Boids-Flock-Big/>: after the first visit it works offline, and *Add to Home Screen* installs it as an app |
+| Online, once | <https://samplatypus.github.io/Boids-Flock-Big/>: the first visit saves Boids on your device. After that it runs with no network: no requests, no updates. *Add to Home Screen* installs it as an app |
 | Single file, no server | Open `dist/boids.html` (or `index.html`, which forwards to it from disk). HTML, CSS and JS are all inline: nothing is fetched, so it works offline |
 | Local dev server | `npm start` → <http://localhost:8080> |
 | Test on a phone on the same Wi-Fi | `npm run start:lan`, then open the printed `Network:` URL |
@@ -32,7 +32,7 @@ Boids is a progressive web app (PWA). Installed, it opens full screen from your 
 | Mac: Safari 17+ | **File → Add to Dock** |
 | Anything else | **Download file** (Scenes → App) saves the whole app as one HTML file that runs offline |
 
-Offline is the default, not a fallback. The first visit saves the whole app on the device: 41 files, under 1 MB, with the progress shown under Scenes → App. From then on every launch runs from that saved copy, whether you're online or not, and never waits for the network. A new version, when one is published, downloads quietly in the background as a complete, verified set. It takes over the next time you open the app, or straight away if you tap **Update ready · Restart**. If you never go online again, the app keeps running the version it has. [Offline](#offline) has the details. The install dialogs on Android and desktop show the screenshots listed in the manifest.
+The first visit saves the whole app on the device: 41 files, under 1 MB, with the progress shown under Scenes → App. From then on Boids never touches the network. Every launch runs from the saved copy, and it never updates: the version you saved is the version you keep. [Offline](#offline) has the details.
 
 **Gestures**
 
@@ -56,7 +56,7 @@ The drawer is dark translucent glass (`backdrop-filter: blur(12px)`, with an opa
 | --- | --- |
 | **Flock** | Separation, Alignment, Cohesion, Max Speed, Turning force and Perception Radius sliders; beacon mode and touch strengths |
 | **Ecosystem** | Live population chart (10 min). Per-species count, mean energy and evolved genes (generation, speed, sight). Births, starvations, catches and migrants. **− / +** steppers for each species and for predators (press and hold to repeat). Life-cycle switch, Food Spawn Rate, Energy Decay, Carrying Capacity. Predator speed, aggression, panic radius and scatter |
-| **Scenes** | One-tap presets (below), Pause, Respawn, Reset all, time scale |
+| **Scenes** | One-tap presets (below), Pause, Respawn, Reset all, time scale. **App**: offline status and the saved version, install, single-file download |
 | **Style** | Palettes, motion trails, custom colours, stats overlay, debug view, resolution cap |
 
 **Presets** set every behaviour key at once, so switching between them is predictable. Colours are left alone. Populations, capacity and food are scaled to the screen area.
@@ -247,25 +247,27 @@ With the life cycle off, populations are fixed: caught prey respawn elsewhere, a
 
 ### Offline
 
-[`sw.js`](sw.js) is a cache-first service worker, and [`src/offline.js`](src/offline.js) is its page side.
+Boids saves itself on the device once, then never touches the network again and never updates. [`sw.js`](sw.js) is the service worker that enforces this, and [`src/offline.js`](src/offline.js) is its page side.
 
-- **Every file is fingerprinted.** `npm run build` writes the list of app files into `sw.js`, with the SHA-256 of each file's content, and derives a version from all of them. The list covers the page, manifest, icons, every module and stylesheet, and the single-file build. Any change to any file changes `sw.js`, which is how browsers notice an update.
-- **Versions are saved whole and verified, or not at all.** Installing a version downloads every file into a cache named after it, bypassing the HTTP cache, and checks each one against its hash. One missing or corrupted file fails the install and the running version stays untouched. The files that did verify are kept, so a retry only downloads what is missing.
-- **Cache-first.** Every file of the app is served from the saved version, online or offline. Launching never waits for the network and never mixes files from two versions. Only files outside the app, such as the install-dialog screenshots, go to the network.
-- **Updates.** Each time the app is opened online, and hourly while it stays open, the browser compares `sw.js`. A new version downloads in the background and waits. It takes over when the app next starts, or immediately via **Update ready · Restart**. Settings are kept, and the simulation restarts fresh.
-- **Self-repair and tidiness.** If the browser drops a saved file, it is put back from the network the next time it's needed, provided it is still the right version. Activation deletes only this app's older versions, so other apps on the same origin (other GitHub Pages projects, for example) keep their caches. An installed app also asks the browser to keep its storage persistent.
+- **One verified download.** `npm run build` writes the list of app files into `sw.js`, with the SHA-256 of each file's content, and derives a version from all of them and from the worker's own code. The list covers the page, manifest, icons, every module and stylesheet, and the single-file build. The first visit downloads every file, bypassing the HTTP cache, and checks each against its hash. The files are saved all or nothing: a missing or corrupted file fails the save, and the next visit retries just the missing files.
+- **No network, ever after.** Every request the app makes is answered from the saved copy. A request for anything not saved gets an error, never the network. If the browser ever deletes the saved copy (under storage pressure), the app shows a page explaining how to get it back instead of going online. The app's own code contains no network calls at all, and a test enforces that.
+- **Zero updates.** The version saved first is frozen on the device. Browsers re-check `sw.js` when an installed web app is opened online. That is built into browsers, and no web page can switch it off. If the check finds a different version, the new worker refuses to install before downloading a single file. The one exception is a device that still has an earlier, updating build of Boids, which used the network: it moves to the frozen build once, immediately, and then stays frozen. To get a newer version deliberately, remove the app, clear the site's data and open it again online.
+- **Tidy.** Activation deletes only this app's other caches, so other apps on the same origin (other GitHub Pages projects, for example) keep theirs. An installed app also asks the browser to keep its storage persistent.
 
-I measured this end to end in Chromium, against a local server laid out like GitHub Pages:
-- The first visit saves all 41 files.
-- An offline launch runs the app.
-- With the server taking 6 s per file, the app was running 58–81 ms after launch.
-- A corrupted update was rejected, and version 1 kept running.
-- A good update downloaded while version 1 ran. It took over after *Restart*, and also after closing and reopening the app. It then worked offline.
-- Another app's cache on the same origin survived.
+I measured this end to end in Chromium, logging every request that reached a server laid out like GitHub Pages:
+- **First visit:** the one-time download, 76 requests (the page plus the 41 saved files).
+- **Five more launches online:** including a link with settings and the single file, zero requests reached the server.
+- **After a newer version was published:** three launches sent zero requests, and the device stayed on its frozen version.
+- **Offline:** the app launches normally.
+- **Device on the previous, updating build:** it moved to the frozen build in one launch, and its old caches were deleted.
+
+With HTTP caching switched off entirely, the worst case, the only requests left were the browser's own checks of the 5 KB `sw.js`. It made 3 checks in 3 launches, downloaded no app files, and the newer version was refused. On GitHub Pages, a check within 10 minutes of the last one is answered from the browser's HTTP cache.
+
+For literally zero network, with no browser checks either, use the single file. Open `boids.html` from your device and nothing is ever requested.
 
 [`test/sw.test.js`](test/sw.test.js) runs the real `sw.js` against simulated Cache Storage and network in Node.
 
-`npm start` serves the source with offline caching switched off, so edits show up on reload. `npm run preview` serves the built site with the real service worker. The single-file `dist/boids.html` needs none of this: it is offline by construction.
+`npm start` serves the source with offline caching switched off, so edits show up on reload. `npm run preview` serves the built site with the real service worker.
 
 ### Touch physics
 
@@ -319,7 +321,7 @@ src/config.js            reactive, validated, self-describing config store
 src/presets.js           one-tap scenarios and screen-area scaling
 src/themes.js            colour palettes
 src/persist.js           settings persistence (localStorage)
-src/offline.js           service worker registration, offline status and updates
+src/offline.js           service worker registration and offline status (makes no network requests)
 src/loop.js              fixed-timestep loop with interpolation and spiral-of-death guard
 src/stats.js             FPS / timing overlay
 src/core/                torus maths, spatial hash, seeded PRNG, colour maths, scalar helpers, event emitter
@@ -328,8 +330,9 @@ src/sim/                 simulation, species, prey pool (struct of arrays), floc
 src/render/              DPR-aware surface, silhouettes, renderer
 src/input/               multi-touch gestures → simulation API
 src/ui/                  glass HUD: pill + drawer, schema-bound controls, population chart, styles
-sw.js                    cache-first service worker; its file list and hashes are generated by the build
-manifest.webmanifest, icons/, screenshots/   PWA manifest, app icons, install-dialog screenshots
+sw.js                    service worker: one verified save, then no network and no updates; its file
+                         list and hashes are generated by the build
+manifest.webmanifest, icons/   PWA manifest and app icons
 dist/boids.html          generated single-file build (all JS and CSS inline; runs from file://)
 scripts/                 serve.mjs (dev server) · build.mjs (zero-dependency bundler) · site.mjs (Pages
                          site assembly) · bench.mjs
@@ -354,7 +357,7 @@ npm run bench       # headless performance benchmark
 
 ### Deployment
 
-[`.github/workflows/pages.yml`](.github/workflows/pages.yml) type-checks and tests every push and pull request. On the default branch it then publishes to GitHub Pages. `npm run site` assembles `_site/`, which holds the hosted app with its service worker, manifest, icons and screenshots, plus `dist/boids.html`. The script fails if any file in the offline list is missing or differs from its hash in `sw.js`, because a single bad file would stop every visitor's offline copy from installing. `actions/deploy-pages` then publishes the folder. For this to work, the repository's Settings → Pages → Source must be set to *GitHub Actions*.
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) type-checks and tests every push and pull request. On the default branch it then publishes to GitHub Pages. `npm run site` assembles `_site/`, which holds the hosted app with its service worker, manifest and icons, plus `dist/boids.html`. The script fails if any file in the offline list is missing or differs from its hash in `sw.js`, because a single bad file would stop every visitor's offline copy from installing. `actions/deploy-pages` then publishes the folder. For this to work, the repository's Settings → Pages → Source must be set to *GitHub Actions*.
 
 Notes for contributors:
 

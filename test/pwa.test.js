@@ -32,17 +32,26 @@ test('sw.js lists every app file with its current hash (run `npm run build`)', a
   for (const page of ['index.html', 'manifest.webmanifest', 'dist/boids.html', 'icons/icon-180.png']) assert.ok(files.includes(page), page);
 });
 
-test('every icon and screenshot referenced by the manifest exists', async () => {
-  const manifest = JSON.parse(await readFile(join(ROOT, 'manifest.webmanifest'), 'utf8'));
+test('the manifest references only files of the app, with no external URLs', async () => {
+  const text = await readFile(join(ROOT, 'manifest.webmanifest'), 'utf8');
+  const manifest = JSON.parse(text);
   assert.ok(manifest.icons.length >= 3);
   for (const icon of manifest.icons) await assert.doesNotReject(access(join(ROOT, icon.src)), `${icon.src} missing`);
-  // Richer install dialogs: phones show the narrow screenshots, desktops the wide ones.
-  const factors = new Set(manifest.screenshots.map((/** @type {{ form_factor: string }} */ s) => s.form_factor));
-  assert.deepEqual([...factors].sort(), ['narrow', 'wide']);
-  for (const shot of manifest.screenshots) {
-    await assert.doesNotReject(access(join(ROOT, shot.src)), `${shot.src} missing`);
-    const [w, h] = shot.sizes.split('x').map(Number);
-    assert.ok(Math.max(w, h) / Math.min(w, h) <= 2.3, `${shot.src}: aspect ratio too extreme for install dialogs`);
-  }
+  assert.equal(manifest.screenshots, undefined, 'nothing for the browser to fetch beyond the saved icons');
+  assert.doesNotMatch(text, /https?:\/\//, 'no external URLs');
   assert.equal(manifest.id, './');
+});
+
+test('the app itself makes no network requests', async () => {
+  // The SVG namespace is an identifier, never fetched.
+  const allowed = ['http://www.w3.org/2000/svg'];
+  const forbidden = /\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts|\.update\(\)|https?:\/\/[^\s'"`)]+/g;
+  for (const file of [...(await listModules(join(ROOT, 'src'))), join(ROOT, 'index.html')]) {
+    const source = await readFile(file, 'utf8');
+    const hits = [...source.matchAll(forbidden)].map((m) => m[0]).filter((hit) => !allowed.includes(hit));
+    assert.deepEqual(hits, [], `${relative(ROOT, file)} must not touch the network`);
+  }
+  // The service worker downloads the app once, in one place.
+  const sw = await readFile(join(ROOT, 'sw.js'), 'utf8');
+  assert.equal([...sw.matchAll(/\bfetch\s*\(/g)].length, 1, 'sw.js fetches only during the one-time save');
 });

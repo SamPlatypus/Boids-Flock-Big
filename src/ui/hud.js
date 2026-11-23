@@ -36,7 +36,6 @@ const ICONS = Object.freeze({
   balance: 'M21 12a9 9 0 0 1-15.5 6.2M3 12a9 9 0 0 1 15.5-6.2M18 2v4h-4M6 22v-4h4',
   zen: 'M2 9c3-3 5-3 8 0s5 3 8 0M2 15c3-3 5-3 8 0s5 3 8 0',
   install: 'M12 4v11M7 10l5 5 5-5M5 20h14',
-  refresh: 'M20 11a8 8 0 1 0-2.3 5.6M20 4v7h-7',
 });
 
 const TABS = /** @type {const} */ ([
@@ -91,7 +90,7 @@ function writeStorage(key, value) {
 /**
  * Build and mount the HUD.
  * @param {FlockingApp} app
- * @param {Offline} [offline] Offline status and updates (hosted app).
+ * @param {Offline} [offline] Offline status (hosted app).
  */
 export function createHud(app, offline) {
   const { config, sim } = app;
@@ -160,9 +159,7 @@ export function createHud(app, offline) {
   const toasts = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
   // Shown above the pill when the browser offers installation (hidden while the drawer is open).
   const installChip = h('button', { type: 'button', class: 'install-chip glass', hidden: true }, icon(ICONS.install), h('span', { text: 'Install app' }));
-  // A newer version is saved and waiting: offer to restart into it (takes the chip's place).
-  const updateChip = h('button', { type: 'button', class: 'install-chip glass', hidden: true }, icon(ICONS.refresh), h('span', { text: 'Update ready · Restart' }));
-  const root = h('div', { class: 'hud', 'data-open': 'false' }, installChip, updateChip, pill, pillStatus, drawer, toasts);
+  const root = h('div', { class: 'hud', 'data-open': 'false' }, installChip, pill, pillStatus, drawer, toasts);
 
   /** @type {Record<string, HTMLElement>} */
   const panelById = {};
@@ -328,7 +325,6 @@ export function createHud(app, offline) {
   const offlineText = h('span');
   const offlineLine = h('p', { class: 'offline-status' }, offlineDot, offlineText);
   const versionLine = h('p', { class: 'offline-version' });
-  const updateButton = h('button', { type: 'button', class: 'btn primary', text: 'Restart to update', hidden: true });
   const appSection = h(
     'div',
     { class: 'section' },
@@ -338,7 +334,6 @@ export function createHud(app, offline) {
       { class: 'card install-card' },
       offlineLine,
       versionLine,
-      h('div', { class: 'actions two' }, updateButton),
       installNote,
       h('div', { class: 'actions two' }, installButton, downloadLink),
     ),
@@ -474,7 +469,6 @@ export function createHud(app, offline) {
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'touchstart', 'touchmove', 'touchend', 'wheel', 'contextmenu', 'click']) {
     pill.addEventListener(type, isolate, { passive: true });
     installChip.addEventListener(type, isolate, { passive: true });
-    updateChip.addEventListener(type, isolate, { passive: true });
     drawer.addEventListener(type, isolate, { passive: true });
   }
   root.addEventListener('keydown', (e) => {
@@ -613,7 +607,7 @@ export function createHud(app, offline) {
     const canPrompt = hosted && installPrompt !== null && !installed();
     installButton.hidden = !canPrompt;
     installHeadButton.hidden = !canPrompt;
-    installChip.hidden = !canPrompt || !updateChip.hidden;
+    installChip.hidden = !canPrompt;
     let note;
     if (installed()) note = 'Installed: Boids runs full screen and works offline.';
     else if (installedThisSession) note = 'Installed: open Boids from your home screen or app list.';
@@ -659,45 +653,32 @@ export function createHud(app, offline) {
   });
   reflectInstall();
 
-  // ── Offline status & updates ─────────────────────────────────────────────
+  // ── Offline status ───────────────────────────────────────────────────────
   /** @type {OfflineStatus | null} */
   let lastOffline = null;
   /** @param {OfflineStatus} status */
   function reflectOffline(status) {
-    const update = status.state === 'update';
-    updateChip.hidden = !update;
-    updateButton.hidden = !update;
-    const files = status.files > 0 ? `all ${status.files} files are` : 'everything is';
+    const files = status.files > 0 ? `All ${status.files} files are` : 'Everything is';
     /** @type {Record<OfflineStatus['state'], string>} */
     const text = {
       unsupported: 'This browser can’t save the app here. “Download file” works offline anywhere.',
-      saving: 'Saving Boids to this device for offline use…',
-      ready: status.online
-        ? `Works offline: ${files} saved on this device.`
-        : 'You’re offline. Boids is running from the copy saved on this device.',
-      update: 'A new version is saved. It starts next time you open Boids, or restart now (settings are kept).',
+      saving: 'Saving Boids to this device (a one-time download)…',
+      ready: `${files} saved on this device. Boids runs with no network: no requests, no updates.`,
       dev: 'Offline saving is off on the development server (npm run preview tests it).',
-      error: 'Couldn’t save Boids for offline use this time. It tries again the next time you open it online.',
+      error: 'Couldn’t save Boids this time. It tries again the next time you open it online.',
     };
     setText(offlineText, text[status.state]);
-    offlineDot.dataset.state = status.state === 'ready' || status.state === 'update' ? 'ok' : status.state === 'saving' ? 'busy' : 'off';
-    const version = status.version ? `Version ${status.version}` : '';
-    setText(versionLine, update && status.nextVersion ? `${version} · new: ${status.nextVersion}` : version);
-    versionLine.hidden = !version;
+    offlineDot.dataset.state = status.state === 'ready' ? 'ok' : status.state === 'saving' ? 'busy' : 'off';
+    setText(versionLine, status.version ? `Version ${status.version} · frozen on this device` : '');
+    versionLine.hidden = !status.version;
     if (status.state === 'ready' && lastOffline?.state === 'saving' && !readStorage(OFFLINE_READY_STORAGE_KEY)) {
-      toast('Saved for offline use: Boids now works without internet', 5000);
+      toast('Saved: Boids now runs without internet', 5000);
       writeStorage(OFFLINE_READY_STORAGE_KEY, '1');
     }
-    if (status.state === 'ready' && lastOffline?.online && !status.online) toast('Offline: running from the saved copy');
-    if (update && lastOffline?.state !== 'update') toast('Update ready: restart Boids to use it', 4000);
     lastOffline = status;
-    reflectInstall();
   }
   if (offline) {
     cleanups.push(offline.subscribe(reflectOffline));
-    const restart = () => offline.applyUpdate();
-    updateButton.addEventListener('click', restart);
-    updateChip.addEventListener('click', restart);
   } else {
     offlineLine.hidden = true;
     versionLine.hidden = true;

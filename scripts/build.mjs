@@ -169,8 +169,8 @@ async function appFiles() {
 /**
  * sw.js with its generated section brought up to date: the list of app files
  * with the SHA-256 of each file's content, and a version derived from all of
- * them. Any change to any file changes sw.js, which is how browsers notice a
- * new version; the service worker checks every download against these hashes.
+ * them and from the worker's own code. The worker checks the one-time download
+ * against these hashes, and a device frozen at one version refuses any other.
  * @param {string} [standalone] The single-file build, if already built.
  * @returns {Promise<string>}
  */
@@ -182,8 +182,16 @@ export async function buildServiceWorker(standalone) {
     const bytes = file === './dist/boids.html' ? Buffer.from(html) : await readFile(resolve(ROOT, file));
     entries.push([file, createHash('sha256').update(bytes).digest('base64')]);
   }
+  const source = await readFile(SERVICE_WORKER, 'utf8');
+  const start = source.indexOf(GENERATED_START);
+  const end = source.indexOf(GENERATED_END);
+  if (start < 0 || end < start) throw new Error('sw.js: generated section markers not found');
+  // The worker's own code is part of the version too: devices frozen at one
+  // version refuse any other, including a changed worker.
+  const logic = source.slice(0, start) + source.slice(end + GENERATED_END.length);
   const version = createHash('sha256')
     .update(entries.map(([file, hash]) => `${file} ${hash}\n`).join(''))
+    .update(`sw.js ${createHash('sha256').update(logic).digest('base64')}\n`)
     .digest('hex')
     .slice(0, 10);
   const generated = [
@@ -195,10 +203,6 @@ export async function buildServiceWorker(standalone) {
     '};',
     GENERATED_END,
   ].join('\n');
-  const source = await readFile(SERVICE_WORKER, 'utf8');
-  const start = source.indexOf(GENERATED_START);
-  const end = source.indexOf(GENERATED_END);
-  if (start < 0 || end < start) throw new Error('sw.js: generated section markers not found');
   return source.slice(0, start) + generated + source.slice(end + GENERATED_END.length);
 }
 

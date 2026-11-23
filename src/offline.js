@@ -1,7 +1,10 @@
 /**
  * The page's side of offline support: registers the service worker (sw.js)
- * and reports whether the app is saved on this device, which version runs,
- * and when a newer version is waiting.
+ * and reports whether Boids is saved on this device, and which version.
+ *
+ * This module makes no network requests. After the first visit the service
+ * worker answers every request from the saved copy, and a device stays at
+ * the version it saved first (no updates).
  *
  * Only the hosted app (served over http(s) with its manifest) registers a
  * service worker. The single-file build runs offline by construction and
@@ -11,9 +14,7 @@
  * - 'unsupported': no service worker here (single-file build, file://, an old
  *   browser, some private modes).
  * - 'saving': first visit; the app is being saved to the device.
- * - 'ready': the whole app is saved and runs offline.
- * - 'update': a newer version is saved and waiting. It starts the next time
- *   the app opens, or now through applyUpdate() (reloads the page).
+ * - 'ready': the whole app is saved; it runs with no network.
  * - 'dev': the development server, where offline saving is off.
  * - 'error': the app could not be saved this time (registration failed, or
  *   the first download was interrupted or corrupted). It retries the next
@@ -22,15 +23,13 @@
  * @module offline
  */
 
-/** @typedef {'unsupported' | 'saving' | 'ready' | 'update' | 'dev' | 'error'} OfflineState */
+/** @typedef {'unsupported' | 'saving' | 'ready' | 'dev' | 'error'} OfflineState */
 
 /**
  * @typedef {object} OfflineStatus
  * @property {OfflineState} state
- * @property {string | null} version Version running (or saved) on this device.
- * @property {string | null} nextVersion Version waiting to start ('update').
- * @property {number} files Files saved for offline use.
- * @property {boolean} online Whether the device currently has a network.
+ * @property {string | null} version Version saved on this device.
+ * @property {number} files Files saved.
  */
 
 /**
@@ -38,11 +37,7 @@
  * @property {() => OfflineStatus} status
  * @property {(listener: (status: OfflineStatus) => void) => () => void} subscribe
  *   Called now and on every change.
- * @property {() => void} applyUpdate Switch to the waiting version and reload.
  */
-
-/** How often an open app asks for a newer version (only sw.js is compared). */
-const UPDATE_CHECK_MS = 60 * 60 * 1000;
 
 /** Whether the app runs installed (home screen / app window) rather than in a browser tab. */
 export function isInstalled() {
@@ -51,7 +46,7 @@ export function isInstalled() {
 }
 
 /**
- * Ask a service worker for its version.
+ * Ask a service worker which version it serves (a message, not a request).
  * @param {ServiceWorker | null} worker
  * @returns {Promise<{ version?: string, files?: number, dev?: boolean } | null>}
  */
@@ -71,73 +66,51 @@ function ask(worker) {
 /** @returns {Offline} */
 export function startOffline() {
   /** @type {OfflineStatus} */
-  const status = { state: 'unsupported', version: null, nextVersion: null, files: 0, online: navigator.onLine };
+  const status = { state: 'unsupported', version: null, files: 0 };
   /** @type {Set<(status: OfflineStatus) => void>} */
   const listeners = new Set();
   const emit = () => {
     for (const listener of listeners) listener({ ...status });
   };
-  const onNetwork = () => {
-    status.online = navigator.onLine;
+  /** @param {ServiceWorker | null} worker */
+  const describe = async (worker) => {
+    const info = await ask(worker);
+    if (info?.dev) {
+      status.state = 'dev';
+    } else {
+      status.state = 'ready';
+      status.version = info?.version ?? status.version;
+      status.files = info?.files ?? status.files;
+    }
     emit();
   };
-  addEventListener('online', onNetwork);
-  addEventListener('offline', onNetwork);
 
   const container = navigator.serviceWorker;
   const hosted = location.protocol.startsWith('http') && document.querySelector('link[rel="manifest"]') !== null;
-  let reloadOnTakeover = false;
-
   if (hosted && container) {
     status.state = 'saving';
-    container.addEventListener('controllerchange', () => {
-      if (reloadOnTakeover) location.reload();
-    });
+    // A device moving off an earlier, updating build switches workers once.
+    container.addEventListener('controllerchange', () => describe(container.controller));
     container
-      .register('./sw.js', { updateViaCache: 'none' })
+      // 'all': the browser's own re-checks of sw.js may be answered from its
+      // HTTP cache instead of the network.
+      .register('./sw.js', { updateViaCache: 'all' })
       .then((registration) => {
-        /** @param {ServiceWorker} worker */
-        const watchInstall = (worker) => {
-          worker.addEventListener('statechange', async () => {
-            // An update (not the first install) finished downloading.
-            if (worker.state === 'installed' && container.controller) {
-              status.nextVersion = (await ask(worker))?.version ?? null;
-              status.state = 'update';
-              emit();
-            }
-            // The first save failed (connection lost, corrupted file). A
-            // failed update needs no notice: the saved version keeps running.
-            if (worker.state === 'redundant' && !registration.active) {
-              status.state = 'error';
-              emit();
-            }
-          });
-        };
-        if (registration.installing) watchInstall(registration.installing);
-        registration.addEventListener('updatefound', () => {
-          if (registration.installing) watchInstall(registration.installing);
+        const installing = registration.installing;
+        installing?.addEventListener('statechange', () => {
+          // The first save failed (connection lost, corrupted file).
+          if (installing.state === 'redundant' && !registration.active) {
+            status.state = 'error';
+            emit();
+          }
         });
-        setInterval(() => registration.update().catch(() => {}), UPDATE_CHECK_MS);
         return container.ready;
       })
       .then(async (registration) => {
-        const info = await ask(registration.active);
-        if (info?.dev) {
-          status.state = 'dev';
-        } else {
-          status.version = info?.version ?? null;
-          status.files = info?.files ?? 0;
-          if (registration.waiting) {
-            status.nextVersion = (await ask(registration.waiting))?.version ?? null;
-            status.state = 'update';
-          } else {
-            status.state = 'ready';
-          }
-          // Ask the browser not to evict the saved copy under storage pressure
-          // (granted silently for installed apps; never prompts in a tab).
-          if (isInstalled()) navigator.storage?.persist?.().catch(() => {});
-        }
-        emit();
+        await describe(registration.active);
+        // Ask the browser not to evict the saved copy under storage pressure
+        // (granted silently for installed apps; never prompts in a tab).
+        if (isInstalled()) navigator.storage?.persist?.().catch(() => {});
       })
       .catch(() => {
         status.state = 'error';
@@ -151,13 +124,6 @@ export function startOffline() {
       listeners.add(listener);
       listener({ ...status });
       return () => listeners.delete(listener);
-    },
-    applyUpdate() {
-      container?.getRegistration().then((registration) => {
-        if (!registration?.waiting) return;
-        reloadOnTakeover = true;
-        registration.waiting.postMessage({ type: 'SKIP_WAITING' });
-      });
     },
   };
 }
