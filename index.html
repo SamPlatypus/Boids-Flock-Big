@@ -81,13 +81,5 @@
   <pre id="stats" hidden></pre>
   <noscript>This simulation needs JavaScript.</noscript>
   <script type="module" src="./src/main.js"></script>
-  <!-- hosted-only:start -->
-  <script>
-    // Offline-first: cache the app shell once it has been opened over http(s).
-    if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-      addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
-    }
-  </script>
-  <!-- hosted-only:end -->
 </body>
 </html>

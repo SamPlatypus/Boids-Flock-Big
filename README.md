@@ -32,7 +32,7 @@ Boids is a progressive web app (PWA). Installed, it opens full screen from your 
 | Mac: Safari 17+ | **File → Add to Dock** |
 | Anything else | **Download file** (Scenes → App) saves the whole app as one HTML file that runs offline |
 
-Once installed, the app updates itself when it's online. After the first visit, every file it needs is cached. The install dialogs on Android and desktop show the screenshots listed in the manifest.
+Offline is the default, not a fallback. The first visit saves the whole app on the device: 41 files, under 1 MB, with the progress shown under Scenes → App. From then on every launch runs from that saved copy, whether you're online or not, and never waits for the network. A new version, when one is published, downloads quietly in the background as a complete, verified set. It takes over the next time you open the app, or straight away if you tap **Update ready · Restart**. If you never go online again, the app keeps running the version it has. [Offline](#offline) has the details. The install dialogs on Android and desktop show the screenshots listed in the manifest.
 
 **Gestures**
 
@@ -245,6 +245,28 @@ Measured with the defaults on a phone-sized world (12 seeds, 20 simulated minute
 
 With the life cycle off, populations are fixed: caught prey respawn elsewhere, and the remaining food fades out within 3 s.
 
+### Offline
+
+[`sw.js`](sw.js) is a cache-first service worker, and [`src/offline.js`](src/offline.js) is its page side.
+
+- **Every file is fingerprinted.** `npm run build` writes the list of app files into `sw.js`, with the SHA-256 of each file's content, and derives a version from all of them. The list covers the page, manifest, icons, every module and stylesheet, and the single-file build. Any change to any file changes `sw.js`, which is how browsers notice an update.
+- **Versions are saved whole and verified, or not at all.** Installing a version downloads every file into a cache named after it, bypassing the HTTP cache, and checks each one against its hash. One missing or corrupted file fails the install and the running version stays untouched. The files that did verify are kept, so a retry only downloads what is missing.
+- **Cache-first.** Every file of the app is served from the saved version, online or offline. Launching never waits for the network and never mixes files from two versions. Only files outside the app, such as the install-dialog screenshots, go to the network.
+- **Updates.** Each time the app is opened online, and hourly while it stays open, the browser compares `sw.js`. A new version downloads in the background and waits. It takes over when the app next starts, or immediately via **Update ready · Restart**. Settings are kept, and the simulation restarts fresh.
+- **Self-repair and tidiness.** If the browser drops a saved file, it is put back from the network the next time it's needed, provided it is still the right version. Activation deletes only this app's older versions, so other apps on the same origin (other GitHub Pages projects, for example) keep their caches. An installed app also asks the browser to keep its storage persistent.
+
+I measured this end to end in Chromium, against a local server laid out like GitHub Pages:
+- The first visit saves all 41 files.
+- An offline launch runs the app.
+- With the server taking 6 s per file, the app was running 58–81 ms after launch.
+- A corrupted update was rejected, and version 1 kept running.
+- A good update downloaded while version 1 ran. It took over after *Restart*, and also after closing and reopening the app. It then worked offline.
+- Another app's cache on the same origin survived.
+
+[`test/sw.test.js`](test/sw.test.js) runs the real `sw.js` against simulated Cache Storage and network in Node.
+
+`npm start` serves the source with offline caching switched off, so edits show up on reload. `npm run preview` serves the built site with the real service worker. The single-file `dist/boids.html` needs none of this: it is offline by construction.
+
 ### Touch physics
 
 A tap creates a pulse with push(d, t) = strength · e^(−t/τ) · (1 − u²)², where u = (d − c·t)/thickness. This is a smooth wavefront travelling outward at 540 px/s with exponential decay, and it also induces panic. Beacons ease toward the finger, ramp in and out instead of popping, and act on toroidal distance. Repulsors also push predators, so you can defend a school.
@@ -297,6 +319,7 @@ src/config.js            reactive, validated, self-describing config store
 src/presets.js           one-tap scenarios and screen-area scaling
 src/themes.js            colour palettes
 src/persist.js           settings persistence (localStorage)
+src/offline.js           service worker registration, offline status and updates
 src/loop.js              fixed-timestep loop with interpolation and spiral-of-death guard
 src/stats.js             FPS / timing overlay
 src/core/                torus maths, spatial hash, seeded PRNG, colour maths, scalar helpers, event emitter
@@ -305,7 +328,8 @@ src/sim/                 simulation, species, prey pool (struct of arrays), floc
 src/render/              DPR-aware surface, silhouettes, renderer
 src/input/               multi-touch gestures → simulation API
 src/ui/                  glass HUD: pill + drawer, schema-bound controls, population chart, styles
-sw.js, manifest.webmanifest, icons/   offline-first PWA shell
+sw.js                    cache-first service worker; its file list and hashes are generated by the build
+manifest.webmanifest, icons/, screenshots/   PWA manifest, app icons, install-dialog screenshots
 dist/boids.html          generated single-file build (all JS and CSS inline; runs from file://)
 scripts/                 serve.mjs (dev server) · build.mjs (zero-dependency bundler) · site.mjs (Pages
                          site assembly) · bench.mjs
@@ -316,22 +340,25 @@ test/                    node:test suites (run headless, no browser needed)
 ## Development
 
 ```sh
-npm test            # 57 tests: torus maths, spatial hash vs brute force, config validation,
+npm test            # 68 tests: torus maths, spatial hash vs brute force, config validation,
                     # integrator invariants, determinism, panic waves, predator FSM, ecosystem
                     # (metabolism, grazing, division, mutation, starvation, capacity, predator
-                    # energetics, rescue, food), presets, palettes, persistence, PWA + build freshness
+                    # energetics, rescue, food), presets, palettes, persistence, the offline service
+                    # worker, PWA + build freshness
 npm run typecheck   # strict TypeScript checking of the JSDoc-annotated sources (needs npm install)
-npm run build       # regenerate dist/boids.html (a test fails if it is stale)
-npm run site        # assemble the GitHub Pages site in _site/
+npm run build       # regenerate dist/boids.html and the offline file list in sw.js (tests fail if stale)
+npm run site        # assemble the GitHub Pages site in _site/, verifying every offline file's hash
+npm run preview     # build the site and serve it with the real offline service worker
 npm run bench       # headless performance benchmark
 ```
 
 ### Deployment
 
-[`.github/workflows/pages.yml`](.github/workflows/pages.yml) type-checks and tests every push and pull request. On the default branch it then publishes to GitHub Pages. `npm run site` assembles `_site/`, which holds the hosted app with its service worker, manifest and icons, plus `dist/boids.html`. The script fails if any file the service worker precaches is missing, because a single missing file would stop offline mode from working. `actions/deploy-pages` then publishes the folder. For this to work, the repository's Settings → Pages → Source must be set to *GitHub Actions*.
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) type-checks and tests every push and pull request. On the default branch it then publishes to GitHub Pages. `npm run site` assembles `_site/`, which holds the hosted app with its service worker, manifest, icons and screenshots, plus `dist/boids.html`. The script fails if any file in the offline list is missing or differs from its hash in `sw.js`, because a single bad file would stop every visitor's offline copy from installing. `actions/deploy-pages` then publishes the folder. For this to work, the repository's Settings → Pages → Source must be set to *GitHub Actions*.
 
 Notes for contributors:
 
 - The sources are plain ES modules. The browser runs `src/` as-is, so there is no compile step.
-- When adding a module or stylesheet, also list it in `PRECACHE` in `sw.js` (a test enforces this).
+- After changing any app file, run `npm run build`. It regenerates `dist/boids.html` and the offline file list (with hashes) in `sw.js`, and tests fail if either is stale. New modules and stylesheets are picked up automatically.
+- Line endings are normalised to LF (`.gitattributes`), so the hashes match on every platform.
 - The zero-dependency bundler supports named imports and `export` declarations only, and fails loudly on anything else. It also inlines `<link rel="stylesheet">` files.

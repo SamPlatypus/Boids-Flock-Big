@@ -14,6 +14,7 @@
  */
 
 import { luminance } from '../core/color.js';
+import { isInstalled } from '../offline.js';
 import { SPECIES_COUNT } from '../sim/species.js';
 import { SCENARIOS, activeScenario } from '../presets.js';
 import { COLOR_KEYS, PALETTES, activePalette } from '../themes.js';
@@ -22,6 +23,8 @@ import { colorField, segmented, slider, stepper, toggle } from './controls.js';
 import { h, icon } from './dom.js';
 
 /** @typedef {import('../app.js').FlockingApp} FlockingApp */
+/** @typedef {import('../offline.js').Offline} Offline */
+/** @typedef {import('../offline.js').OfflineStatus} OfflineStatus */
 /** @typedef {import('./controls.js').Control} Control */
 
 const ICONS = Object.freeze({
@@ -33,6 +36,7 @@ const ICONS = Object.freeze({
   balance: 'M21 12a9 9 0 0 1-15.5 6.2M3 12a9 9 0 0 1 15.5-6.2M18 2v4h-4M6 22v-4h4',
   zen: 'M2 9c3-3 5-3 8 0s5 3 8 0M2 15c3-3 5-3 8 0s5 3 8 0',
   install: 'M12 4v11M7 10l5 5 5-5M5 20h14',
+  refresh: 'M20 11a8 8 0 1 0-2.3 5.6M20 4v7h-7',
 });
 
 const TABS = /** @type {const} */ ([
@@ -58,6 +62,7 @@ const COLOR_FOR_SPECIES = /** @type {const} */ (['colorSpecies1', 'colorSpecies2
 const TAB_STORAGE_KEY = 'boids:ui:tab';
 const HINT_STORAGE_KEY = 'boids:ui:hint-seen';
 const INSTALL_TIP_STORAGE_KEY = 'boids:ui:install-tip-seen';
+const OFFLINE_READY_STORAGE_KEY = 'boids:ui:offline-ready-seen';
 
 /**
  * @param {string} key
@@ -86,8 +91,9 @@ function writeStorage(key, value) {
 /**
  * Build and mount the HUD.
  * @param {FlockingApp} app
+ * @param {Offline} [offline] Offline status and updates (hosted app).
  */
-export function createHud(app) {
+export function createHud(app, offline) {
   const { config, sim } = app;
   /** @type {Control[]} */
   const controls = [];
@@ -154,7 +160,9 @@ export function createHud(app) {
   const toasts = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
   // Shown above the pill when the browser offers installation (hidden while the drawer is open).
   const installChip = h('button', { type: 'button', class: 'install-chip glass', hidden: true }, icon(ICONS.install), h('span', { text: 'Install app' }));
-  const root = h('div', { class: 'hud', 'data-open': 'false' }, installChip, pill, pillStatus, drawer, toasts);
+  // A newer version is saved and waiting: offer to restart into it (takes the chip's place).
+  const updateChip = h('button', { type: 'button', class: 'install-chip glass', hidden: true }, icon(ICONS.refresh), h('span', { text: 'Update ready · Restart' }));
+  const root = h('div', { class: 'hud', 'data-open': 'false' }, installChip, updateChip, pill, pillStatus, drawer, toasts);
 
   /** @type {Record<string, HTMLElement>} */
   const panelById = {};
@@ -316,11 +324,24 @@ export function createHud(app) {
   const installNote = h('p', { class: 'install-note' });
   const downloadLink = h('a', { class: 'btn', href: './dist/boids.html', download: 'boids.html', text: 'Download file' });
   downloadLink.title = 'The whole app as one HTML file that runs offline from anywhere';
+  const offlineDot = h('i', { class: 'offline-dot' });
+  const offlineText = h('span');
+  const offlineLine = h('p', { class: 'offline-status' }, offlineDot, offlineText);
+  const versionLine = h('p', { class: 'offline-version' });
+  const updateButton = h('button', { type: 'button', class: 'btn primary', text: 'Restart to update', hidden: true });
   const appSection = h(
     'div',
     { class: 'section' },
     h('h3', { class: 'section-title', text: 'App' }),
-    h('div', { class: 'card install-card' }, installNote, h('div', { class: 'actions two' }, installButton, downloadLink)),
+    h(
+      'div',
+      { class: 'card install-card' },
+      offlineLine,
+      versionLine,
+      h('div', { class: 'actions two' }, updateButton),
+      installNote,
+      h('div', { class: 'actions two' }, installButton, downloadLink),
+    ),
   );
   panelById.scenes.append(
     h('div', { class: 'section' }, h('h3', { class: 'section-title', text: 'Scenarios' }), scenarioGrid),
@@ -453,6 +474,7 @@ export function createHud(app) {
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'touchstart', 'touchmove', 'touchend', 'wheel', 'contextmenu', 'click']) {
     pill.addEventListener(type, isolate, { passive: true });
     installChip.addEventListener(type, isolate, { passive: true });
+    updateChip.addEventListener(type, isolate, { passive: true });
     drawer.addEventListener(type, isolate, { passive: true });
   }
   root.addEventListener('keydown', (e) => {
@@ -577,10 +599,8 @@ export function createHud(app) {
 
   // ── Install (PWA) ─────────────────────────────────────────────────────────
   const hosted = location.protocol.startsWith('http') && document.querySelector('link[rel="manifest"]') !== null;
-  const nav = /** @type {Navigator & { standalone?: boolean }} */ (navigator);
   const appleTouch = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const installed = () =>
-    nav.standalone === true || ['standalone', 'fullscreen', 'minimal-ui'].some((mode) => matchMedia(`(display-mode: ${mode})`).matches);
+  const installed = isInstalled;
   /**
    * The browser's deferred install prompt (Chromium: Android, desktop Chrome
    * and Edge). Its default mini-infobar is left alone; this adds a button.
@@ -593,7 +613,7 @@ export function createHud(app) {
     const canPrompt = hosted && installPrompt !== null && !installed();
     installButton.hidden = !canPrompt;
     installHeadButton.hidden = !canPrompt;
-    installChip.hidden = !canPrompt;
+    installChip.hidden = !canPrompt || !updateChip.hidden;
     let note;
     if (installed()) note = 'Installed: Boids runs full screen and works offline.';
     else if (installedThisSession) note = 'Installed: open Boids from your home screen or app list.';
@@ -638,6 +658,51 @@ export function createHud(app) {
     removeEventListener('appinstalled', onInstalled);
   });
   reflectInstall();
+
+  // ── Offline status & updates ─────────────────────────────────────────────
+  /** @type {OfflineStatus | null} */
+  let lastOffline = null;
+  /** @param {OfflineStatus} status */
+  function reflectOffline(status) {
+    const update = status.state === 'update';
+    updateChip.hidden = !update;
+    updateButton.hidden = !update;
+    const files = status.files > 0 ? `all ${status.files} files are` : 'everything is';
+    /** @type {Record<OfflineStatus['state'], string>} */
+    const text = {
+      unsupported: 'This browser can’t save the app here. “Download file” works offline anywhere.',
+      saving: 'Saving Boids to this device for offline use…',
+      ready: status.online
+        ? `Works offline: ${files} saved on this device.`
+        : 'You’re offline. Boids is running from the copy saved on this device.',
+      update: 'A new version is saved. It starts next time you open Boids, or restart now (settings are kept).',
+      dev: 'Offline saving is off on the development server (npm run preview tests it).',
+      error: 'Couldn’t save Boids for offline use. It still works while online.',
+    };
+    setText(offlineText, text[status.state]);
+    offlineDot.dataset.state = status.state === 'ready' || status.state === 'update' ? 'ok' : status.state === 'saving' ? 'busy' : 'off';
+    const version = status.version ? `Version ${status.version}` : '';
+    setText(versionLine, update && status.nextVersion ? `${version} · new: ${status.nextVersion}` : version);
+    versionLine.hidden = !version;
+    if (status.state === 'ready' && lastOffline?.state === 'saving' && !readStorage(OFFLINE_READY_STORAGE_KEY)) {
+      toast('Saved for offline use: Boids now works without internet', 5000);
+      writeStorage(OFFLINE_READY_STORAGE_KEY, '1');
+    }
+    if (status.state === 'ready' && lastOffline?.online && !status.online) toast('Offline: running from the saved copy');
+    if (update && lastOffline?.state !== 'update') toast('Update ready: restart Boids to use it', 4000);
+    lastOffline = status;
+    reflectInstall();
+  }
+  if (offline) {
+    cleanups.push(offline.subscribe(reflectOffline));
+    const restart = () => offline.applyUpdate();
+    updateButton.addEventListener('click', restart);
+    updateChip.addEventListener('click', restart);
+  } else {
+    offlineLine.hidden = true;
+    versionLine.hidden = true;
+  }
+
   // iOS has no install prompt: explain it once, after the first-run hint.
   if (hosted && appleTouch && !installed() && !readStorage(INSTALL_TIP_STORAGE_KEY)) {
     setTimeout(() => toast('Install Boids: tap Share, then “Add to Home Screen”', 6000), 4500);

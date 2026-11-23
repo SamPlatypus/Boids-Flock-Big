@@ -16,7 +16,9 @@ test('the standalone build is a single self-contained classic script', async () 
   assert.ok(!/<script[^>]*type="module"/.test(html), 'no module scripts');
   assert.ok(!/(?:src|href)="\.\/src\//.test(html), 'nothing loaded from src/');
   assert.ok(!/location\.replace\(\s*['"]\.\/dist\/boids\.html/.test(html), 'dev-only file:// redirect stripped');
-  assert.ok(!html.includes('serviceWorker'), 'hosted-only service worker registration stripped');
+  // Offline support registers the service worker only next to the hosted
+  // manifest; the single file runs offline on its own and never registers one.
+  assert.ok(!html.includes('hosted-only'), 'hosted-only blocks stripped');
   assert.ok(!html.includes('manifest.webmanifest'), 'hosted-only manifest link stripped');
   assert.ok(!/<link[^>]+stylesheet/.test(html), 'stylesheets inlined');
   assert.ok(html.includes('backdrop-filter: blur(12px)'), 'UI styles present');

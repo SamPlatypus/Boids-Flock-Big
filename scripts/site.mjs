@@ -7,11 +7,12 @@
  * the manifest, icons and the install-dialog screenshots) plus the single-file
  * build at dist/boids.html. Tests, scripts and package files stay out.
  *
- * Fails if any file the service worker precaches is missing from the output:
- * one missing entry stops the worker from installing, and the app from
- * working offline.
+ * Fails if any file the service worker saves for offline use is missing or
+ * differs from the hash in sw.js: the worker verifies every file, so one bad
+ * file would stop every visitor's offline copy from installing.
  */
-import { access, cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,17 +40,16 @@ await writeFile(join(out, MARKER), '');
 for (const entry of ENTRIES) await cp(join(ROOT, entry), join(out, entry), { recursive: true });
 
 const sw = await readFile(join(ROOT, 'sw.js'), 'utf8');
-const block = sw.match(/const PRECACHE = \[([\s\S]*?)\];/);
-if (!block) throw new Error('PRECACHE list not found in sw.js');
-const precache = [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
-const missing = [];
-for (const entry of precache) {
-  const path = entry === './' ? 'index.html' : entry;
+const files = [...sw.matchAll(/^ {2}'(\.\/[^']+)': '([^']+)',$/gm)];
+if (files.length === 0) throw new Error('sw.js lists no files: run npm run build');
+const problems = [];
+for (const [, path, hash] of files) {
   try {
-    await access(join(out, path));
+    const bytes = await readFile(join(out, path));
+    if (createHash('sha256').update(bytes).digest('base64') !== hash) problems.push(`${path}: differs from sw.js (run npm run build)`);
   } catch {
-    missing.push(entry);
+    problems.push(`${path}: missing`);
   }
 }
-if (missing.length) throw new Error(`precached but missing from the site: ${missing.join(', ')}`);
-console.log(`Site ready in ${out}: ${ENTRIES.join(', ')} (${precache.length} precached files present).`);
+if (problems.length) throw new Error(`the offline copy would fail to install:\n  ${problems.join('\n  ')}`);
+console.log(`Site ready in ${out}: ${ENTRIES.join(', ')} (${files.length} offline files verified).`);

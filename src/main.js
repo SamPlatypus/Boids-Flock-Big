@@ -15,6 +15,7 @@
 
 import { createFlockingApp } from './app.js';
 import { isConfigKey } from './config.js';
+import { startOffline } from './offline.js';
 import { loadSettings, persistSettings } from './persist.js';
 import { createHud } from './ui/hud.js';
 
@@ -37,7 +38,7 @@ const app = createFlockingApp({
 window.simConfig = app.config;
 window.sim = app;
 persistSettings(app.config);
-createHud(app);
+createHud(app, startOffline());
 app.start();
 
 window.addEventListener('keydown', (e) => {

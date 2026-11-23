@@ -706,6 +706,43 @@ a.btn {
   font-size: 13px;
   color: var(--text-dim);
 }
+.offline-status {
+  margin: 0 2px 4px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+}
+.offline-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transform: translateY(-1px);
+}
+.offline-dot[data-state='ok'] {
+  background: #5cf2a6;
+  box-shadow: 0 0 8px #5cf2a6;
+}
+.offline-dot[data-state='busy'] {
+  background: #ffc857;
+  animation: offline-pulse 1.2s ease-in-out infinite;
+}
+@keyframes offline-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.offline-version {
+  margin: 0 2px 10px 18px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.install-card .actions.two:not(:last-child):has(> :not([hidden])) {
+  margin-bottom: 10px;
+}
 
 /* ── Colour fields ─────────────────────────────────────────────────────── */
 .ctl-color {
@@ -6834,8 +6871,167 @@ function randomSeed() {
 }
 return { createFlockingApp };
 })();
-// ── src/persist.js ────────────────────────────────────────────────────
+// ── src/offline.js ────────────────────────────────────────────────────
 const __module24 = (() => {
+/**
+ * The page's side of offline support: registers the service worker (sw.js)
+ * and reports whether the app is saved on this device, which version runs,
+ * and when a newer version is waiting.
+ *
+ * Only the hosted app (served over http(s) with its manifest) registers a
+ * service worker. The single-file build runs offline by construction and
+ * reports 'unsupported'.
+ *
+ * States:
+ * - 'unsupported': no service worker here (single-file build, file://, an old
+ *   browser, some private modes).
+ * - 'saving': first visit; the app is being saved to the device.
+ * - 'ready': the whole app is saved and runs offline.
+ * - 'update': a newer version is saved and waiting. It starts the next time
+ *   the app opens, or now through applyUpdate() (reloads the page).
+ * - 'dev': the development server, where offline saving is off.
+ * - 'error': the service worker could not be registered.
+ *
+ * @module offline
+ */
+
+/** @typedef {'unsupported' | 'saving' | 'ready' | 'update' | 'dev' | 'error'} OfflineState */
+
+/**
+ * @typedef {object} OfflineStatus
+ * @property {OfflineState} state
+ * @property {string | null} version Version running (or saved) on this device.
+ * @property {string | null} nextVersion Version waiting to start ('update').
+ * @property {number} files Files saved for offline use.
+ * @property {boolean} online Whether the device currently has a network.
+ */
+
+/**
+ * @typedef {object} Offline
+ * @property {() => OfflineStatus} status
+ * @property {(listener: (status: OfflineStatus) => void) => () => void} subscribe
+ *   Called now and on every change.
+ * @property {() => void} applyUpdate Switch to the waiting version and reload.
+ */
+
+/** How often an open app asks for a newer version (only sw.js is compared). */
+const UPDATE_CHECK_MS = 60 * 60 * 1000;
+
+/** Whether the app runs installed (home screen / app window) rather than in a browser tab. */
+function isInstalled() {
+  const nav = /** @type {Navigator & { standalone?: boolean }} */ (navigator);
+  return nav.standalone === true || ['standalone', 'fullscreen', 'minimal-ui'].some((mode) => matchMedia(`(display-mode: ${mode})`).matches);
+}
+
+/**
+ * Ask a service worker for its version.
+ * @param {ServiceWorker | null} worker
+ * @returns {Promise<{ version?: string, files?: number, dev?: boolean } | null>}
+ */
+function ask(worker) {
+  if (!worker) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => resolve(null), 3000);
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timer);
+      resolve(event.data);
+    };
+    worker.postMessage({ type: 'STATUS' }, [channel.port2]);
+  });
+}
+
+/** @returns {Offline} */
+function startOffline() {
+  /** @type {OfflineStatus} */
+  const status = { state: 'unsupported', version: null, nextVersion: null, files: 0, online: navigator.onLine };
+  /** @type {Set<(status: OfflineStatus) => void>} */
+  const listeners = new Set();
+  const emit = () => {
+    for (const listener of listeners) listener({ ...status });
+  };
+  const onNetwork = () => {
+    status.online = navigator.onLine;
+    emit();
+  };
+  addEventListener('online', onNetwork);
+  addEventListener('offline', onNetwork);
+
+  const container = navigator.serviceWorker;
+  const hosted = location.protocol.startsWith('http') && document.querySelector('link[rel="manifest"]') !== null;
+  let reloadOnTakeover = false;
+
+  if (hosted && container) {
+    status.state = 'saving';
+    container.addEventListener('controllerchange', () => {
+      if (reloadOnTakeover) location.reload();
+    });
+    container
+      .register('./sw.js', { updateViaCache: 'none' })
+      .then((registration) => {
+        /** @param {ServiceWorker} worker */
+        const watchInstall = (worker) => {
+          worker.addEventListener('statechange', async () => {
+            // An update (not the first install) finished downloading.
+            if (worker.state === 'installed' && container.controller) {
+              status.nextVersion = (await ask(worker))?.version ?? null;
+              status.state = 'update';
+              emit();
+            }
+          });
+        };
+        if (registration.installing) watchInstall(registration.installing);
+        registration.addEventListener('updatefound', () => {
+          if (registration.installing) watchInstall(registration.installing);
+        });
+        setInterval(() => registration.update().catch(() => {}), UPDATE_CHECK_MS);
+        return container.ready;
+      })
+      .then(async (registration) => {
+        const info = await ask(registration.active);
+        if (info?.dev) {
+          status.state = 'dev';
+        } else {
+          status.version = info?.version ?? null;
+          status.files = info?.files ?? 0;
+          if (registration.waiting) {
+            status.nextVersion = (await ask(registration.waiting))?.version ?? null;
+            status.state = 'update';
+          } else {
+            status.state = 'ready';
+          }
+          // Ask the browser not to evict the saved copy under storage pressure
+          // (granted silently for installed apps; never prompts in a tab).
+          if (isInstalled()) navigator.storage?.persist?.().catch(() => {});
+        }
+        emit();
+      })
+      .catch(() => {
+        status.state = 'error';
+        emit();
+      });
+  }
+
+  return {
+    status: () => ({ ...status }),
+    subscribe(listener) {
+      listeners.add(listener);
+      listener({ ...status });
+      return () => listeners.delete(listener);
+    },
+    applyUpdate() {
+      container?.getRegistration().then((registration) => {
+        if (!registration?.waiting) return;
+        reloadOnTakeover = true;
+        registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+      });
+    },
+  };
+}
+return { isInstalled, startOffline };
+})();
+// ── src/persist.js ────────────────────────────────────────────────────
+const __module25 = (() => {
 const { CONFIG_KEYS, COUNT_KEYS } = __module2;
 /**
  * Settings persistence in localStorage, so a home-screen PWA reopens with the
@@ -6939,7 +7135,7 @@ function persistSettings(config, delay = 500) {
 return { loadSettings, persistSettings };
 })();
 // ── src/themes.js ─────────────────────────────────────────────────────
-const __module25 = (() => {
+const __module26 = (() => {
 /**
  * Built-in colour palettes. Applying one writes the six colour keys of the
  * config, which the renderer and UI read; editing any colour afterwards
@@ -7037,7 +7233,7 @@ function activePalette(config) {
 return { COLOR_KEYS, PALETTES, activePalette };
 })();
 // ── src/ui/dom.js ─────────────────────────────────────────────────────
-const __module26 = (() => {
+const __module27 = (() => {
 /**
  * Minimal DOM building helpers (no framework).
  *
@@ -7118,9 +7314,9 @@ function icon(d) {
 return { h, append, icon };
 })();
 // ── src/ui/chart.js ───────────────────────────────────────────────────
-const __module27 = (() => {
+const __module28 = (() => {
 const { rgba } = __module1;
-const { h } = __module26;
+const { h } = __module27;
 /**
  * Population chart: the last ten minutes of the simulation's history.
  *
@@ -7270,9 +7466,9 @@ class PopulationChart {
 return { PopulationChart };
 })();
 // ── src/ui/controls.js ────────────────────────────────────────────────
-const __module28 = (() => {
+const __module29 = (() => {
 const { normalizeHex } = __module1;
-const { h } = __module26;
+const { h } = __module27;
 /**
  * Config-bound controls. Each control writes to the reactive config and
  * subscribes to it, so changes from anywhere (presets, the console, live
@@ -7549,14 +7745,15 @@ function colorField(config, key, options = {}) {
 return { formatValue, slider, toggle, stepper, segmented, colorField };
 })();
 // ── src/ui/hud.js ─────────────────────────────────────────────────────
-const __module29 = (() => {
+const __module30 = (() => {
 const { luminance } = __module1;
+const { isInstalled } = __module24;
 const { SPECIES_COUNT } = __module9;
 const { SCENARIOS, activeScenario } = __module21;
-const { COLOR_KEYS, PALETTES, activePalette } = __module25;
-const { PopulationChart } = __module27;
-const { colorField, segmented, slider, stepper, toggle } = __module28;
-const { h, icon } = __module26;
+const { COLOR_KEYS, PALETTES, activePalette } = __module26;
+const { PopulationChart } = __module28;
+const { colorField, segmented, slider, stepper, toggle } = __module29;
+const { h, icon } = __module27;
 /**
  * Glassmorphic HUD: a floating status pill that expands into a bottom drawer
  * with four tabs. Flock (behaviour sliders, touch settings), Ecosystem (live
@@ -7580,7 +7777,10 @@ const { h, icon } = __module26;
 
 
 
+
 /** @typedef {import('../app.js').FlockingApp} FlockingApp */
+/** @typedef {import('../offline.js').Offline} Offline */
+/** @typedef {import('../offline.js').OfflineStatus} OfflineStatus */
 /** @typedef {import('./controls.js').Control} Control */
 
 const ICONS = Object.freeze({
@@ -7592,6 +7792,7 @@ const ICONS = Object.freeze({
   balance: 'M21 12a9 9 0 0 1-15.5 6.2M3 12a9 9 0 0 1 15.5-6.2M18 2v4h-4M6 22v-4h4',
   zen: 'M2 9c3-3 5-3 8 0s5 3 8 0M2 15c3-3 5-3 8 0s5 3 8 0',
   install: 'M12 4v11M7 10l5 5 5-5M5 20h14',
+  refresh: 'M20 11a8 8 0 1 0-2.3 5.6M20 4v7h-7',
 });
 
 const TABS = /** @type {const} */ ([
@@ -7617,6 +7818,7 @@ const COLOR_FOR_SPECIES = /** @type {const} */ (['colorSpecies1', 'colorSpecies2
 const TAB_STORAGE_KEY = 'boids:ui:tab';
 const HINT_STORAGE_KEY = 'boids:ui:hint-seen';
 const INSTALL_TIP_STORAGE_KEY = 'boids:ui:install-tip-seen';
+const OFFLINE_READY_STORAGE_KEY = 'boids:ui:offline-ready-seen';
 
 /**
  * @param {string} key
@@ -7645,8 +7847,9 @@ function writeStorage(key, value) {
 /**
  * Build and mount the HUD.
  * @param {FlockingApp} app
+ * @param {Offline} [offline] Offline status and updates (hosted app).
  */
-function createHud(app) {
+function createHud(app, offline) {
   const { config, sim } = app;
   /** @type {Control[]} */
   const controls = [];
@@ -7713,7 +7916,9 @@ function createHud(app) {
   const toasts = h('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
   // Shown above the pill when the browser offers installation (hidden while the drawer is open).
   const installChip = h('button', { type: 'button', class: 'install-chip glass', hidden: true }, icon(ICONS.install), h('span', { text: 'Install app' }));
-  const root = h('div', { class: 'hud', 'data-open': 'false' }, installChip, pill, pillStatus, drawer, toasts);
+  // A newer version is saved and waiting: offer to restart into it (takes the chip's place).
+  const updateChip = h('button', { type: 'button', class: 'install-chip glass', hidden: true }, icon(ICONS.refresh), h('span', { text: 'Update ready · Restart' }));
+  const root = h('div', { class: 'hud', 'data-open': 'false' }, installChip, updateChip, pill, pillStatus, drawer, toasts);
 
   /** @type {Record<string, HTMLElement>} */
   const panelById = {};
@@ -7875,11 +8080,24 @@ function createHud(app) {
   const installNote = h('p', { class: 'install-note' });
   const downloadLink = h('a', { class: 'btn', href: './dist/boids.html', download: 'boids.html', text: 'Download file' });
   downloadLink.title = 'The whole app as one HTML file that runs offline from anywhere';
+  const offlineDot = h('i', { class: 'offline-dot' });
+  const offlineText = h('span');
+  const offlineLine = h('p', { class: 'offline-status' }, offlineDot, offlineText);
+  const versionLine = h('p', { class: 'offline-version' });
+  const updateButton = h('button', { type: 'button', class: 'btn primary', text: 'Restart to update', hidden: true });
   const appSection = h(
     'div',
     { class: 'section' },
     h('h3', { class: 'section-title', text: 'App' }),
-    h('div', { class: 'card install-card' }, installNote, h('div', { class: 'actions two' }, installButton, downloadLink)),
+    h(
+      'div',
+      { class: 'card install-card' },
+      offlineLine,
+      versionLine,
+      h('div', { class: 'actions two' }, updateButton),
+      installNote,
+      h('div', { class: 'actions two' }, installButton, downloadLink),
+    ),
   );
   panelById.scenes.append(
     h('div', { class: 'section' }, h('h3', { class: 'section-title', text: 'Scenarios' }), scenarioGrid),
@@ -8012,6 +8230,7 @@ function createHud(app) {
   for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'touchstart', 'touchmove', 'touchend', 'wheel', 'contextmenu', 'click']) {
     pill.addEventListener(type, isolate, { passive: true });
     installChip.addEventListener(type, isolate, { passive: true });
+    updateChip.addEventListener(type, isolate, { passive: true });
     drawer.addEventListener(type, isolate, { passive: true });
   }
   root.addEventListener('keydown', (e) => {
@@ -8136,10 +8355,8 @@ function createHud(app) {
 
   // ── Install (PWA) ─────────────────────────────────────────────────────────
   const hosted = location.protocol.startsWith('http') && document.querySelector('link[rel="manifest"]') !== null;
-  const nav = /** @type {Navigator & { standalone?: boolean }} */ (navigator);
   const appleTouch = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const installed = () =>
-    nav.standalone === true || ['standalone', 'fullscreen', 'minimal-ui'].some((mode) => matchMedia(`(display-mode: ${mode})`).matches);
+  const installed = isInstalled;
   /**
    * The browser's deferred install prompt (Chromium: Android, desktop Chrome
    * and Edge). Its default mini-infobar is left alone; this adds a button.
@@ -8152,7 +8369,7 @@ function createHud(app) {
     const canPrompt = hosted && installPrompt !== null && !installed();
     installButton.hidden = !canPrompt;
     installHeadButton.hidden = !canPrompt;
-    installChip.hidden = !canPrompt;
+    installChip.hidden = !canPrompt || !updateChip.hidden;
     let note;
     if (installed()) note = 'Installed: Boids runs full screen and works offline.';
     else if (installedThisSession) note = 'Installed: open Boids from your home screen or app list.';
@@ -8197,6 +8414,51 @@ function createHud(app) {
     removeEventListener('appinstalled', onInstalled);
   });
   reflectInstall();
+
+  // ── Offline status & updates ─────────────────────────────────────────────
+  /** @type {OfflineStatus | null} */
+  let lastOffline = null;
+  /** @param {OfflineStatus} status */
+  function reflectOffline(status) {
+    const update = status.state === 'update';
+    updateChip.hidden = !update;
+    updateButton.hidden = !update;
+    const files = status.files > 0 ? `all ${status.files} files are` : 'everything is';
+    /** @type {Record<OfflineStatus['state'], string>} */
+    const text = {
+      unsupported: 'This browser can’t save the app here. “Download file” works offline anywhere.',
+      saving: 'Saving Boids to this device for offline use…',
+      ready: status.online
+        ? `Works offline: ${files} saved on this device.`
+        : 'You’re offline. Boids is running from the copy saved on this device.',
+      update: 'A new version is saved. It starts next time you open Boids, or restart now (settings are kept).',
+      dev: 'Offline saving is off on the development server (npm run preview tests it).',
+      error: 'Couldn’t save Boids for offline use. It still works while online.',
+    };
+    setText(offlineText, text[status.state]);
+    offlineDot.dataset.state = status.state === 'ready' || status.state === 'update' ? 'ok' : status.state === 'saving' ? 'busy' : 'off';
+    const version = status.version ? `Version ${status.version}` : '';
+    setText(versionLine, update && status.nextVersion ? `${version} · new: ${status.nextVersion}` : version);
+    versionLine.hidden = !version;
+    if (status.state === 'ready' && lastOffline?.state === 'saving' && !readStorage(OFFLINE_READY_STORAGE_KEY)) {
+      toast('Saved for offline use: Boids now works without internet', 5000);
+      writeStorage(OFFLINE_READY_STORAGE_KEY, '1');
+    }
+    if (status.state === 'ready' && lastOffline?.online && !status.online) toast('Offline: running from the saved copy');
+    if (update && lastOffline?.state !== 'update') toast('Update ready: restart Boids to use it', 4000);
+    lastOffline = status;
+    reflectInstall();
+  }
+  if (offline) {
+    cleanups.push(offline.subscribe(reflectOffline));
+    const restart = () => offline.applyUpdate();
+    updateButton.addEventListener('click', restart);
+    updateChip.addEventListener('click', restart);
+  } else {
+    offlineLine.hidden = true;
+    versionLine.hidden = true;
+  }
+
   // iOS has no install prompt: explain it once, after the first-run hint.
   if (hosted && appleTouch && !installed() && !readStorage(INSTALL_TIP_STORAGE_KEY)) {
     setTimeout(() => toast('Install Boids: tap Share, then “Add to Home Screen”', 6000), 4500);
@@ -8229,11 +8491,12 @@ function createHud(app) {
 return { createHud };
 })();
 // ── src/main.js ───────────────────────────────────────────────────────
-const __module30 = (() => {
+const __module31 = (() => {
 const { createFlockingApp } = __module23;
 const { isConfigKey } = __module2;
-const { loadSettings, persistSettings } = __module24;
-const { createHud } = __module29;
+const { startOffline } = __module24;
+const { loadSettings, persistSettings } = __module25;
+const { createHud } = __module30;
 /**
  * Browser entry point: boots the engine on the full-bleed canvas, mounts the
  * glassmorphic HUD and exposes
@@ -8248,6 +8511,7 @@ const { createHud } = __module29;
  *
  * @module main
  */
+
 
 
 
@@ -8273,7 +8537,7 @@ const app = createFlockingApp({
 window.simConfig = app.config;
 window.sim = app;
 persistSettings(app.config);
-createHud(app);
+createHud(app, startOffline());
 app.start();
 
 window.addEventListener('keydown', (e) => {

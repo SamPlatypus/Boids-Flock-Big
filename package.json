@@ -9,6 +9,7 @@
     "start:lan": "node scripts/serve.mjs --lan",
     "build": "node scripts/build.mjs",
     "site": "node scripts/site.mjs",
+    "preview": "node scripts/site.mjs && node scripts/serve.mjs _site",
     "bench": "node scripts/bench.mjs",
     "test": "node --test",
     "typecheck": "tsc -p tsconfig.json",

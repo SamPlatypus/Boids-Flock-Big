@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { access, readFile, readdir } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildServiceWorker } from '../scripts/build.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -20,16 +21,15 @@ async function listModules(dir) {
   return out;
 }
 
-test('the service worker precaches every module and stylesheet, and every precached file exists', async () => {
-  const sw = await readFile(join(ROOT, 'sw.js'), 'utf8');
-  const block = sw.match(/const PRECACHE = \[([\s\S]*?)\];/);
-  assert.ok(block, 'PRECACHE array found');
-  const precache = [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  const modules = (await listModules(join(ROOT, 'src'))).map((file) => `./${relative(ROOT, file).split(sep).join('/')}`);
-  for (const module of modules) assert.ok(precache.includes(module), `sw.js PRECACHE is missing ${module}`);
-  for (const entry of precache) {
-    if (entry !== './') await assert.doesNotReject(access(join(ROOT, entry)), `${entry} does not exist`);
-  }
+test('sw.js lists every app file with its current hash (run `npm run build`)', async () => {
+  const [fresh, committed] = await Promise.all([buildServiceWorker(), readFile(join(ROOT, 'sw.js'), 'utf8')]);
+  assert.ok(committed === fresh, 'sw.js is stale: run `npm run build`');
+  const files = [...committed.matchAll(/^ {2}'\.\/([^']+)': '[^']+',$/gm)].map((m) => m[1]);
+  const modules = (await listModules(join(ROOT, 'src'))).map((file) => relative(ROOT, file).split(sep).join('/'));
+  for (const module of modules) assert.ok(files.includes(module), `${module} is saved for offline use`);
+  const manifest = JSON.parse(await readFile(join(ROOT, 'manifest.webmanifest'), 'utf8'));
+  for (const icon of manifest.icons) assert.ok(files.includes(icon.src), `${icon.src} is saved for offline use`);
+  for (const page of ['index.html', 'manifest.webmanifest', 'dist/boids.html', 'icons/icon-180.png']) assert.ok(files.includes(page), page);
 });
 
 test('every icon and screenshot referenced by the manifest exists', async () => {
