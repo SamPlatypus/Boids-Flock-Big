@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Boids for Android: the self-contained app (dist/boids.html) in a WebView.
+
+  No <uses-permission> at all, deliberately: without INTERNET, Android itself
+  blocks every network request this app could make. Safe Browsing lookups and
+  WebView usage metrics are switched off, and settings are never backed up to
+  the cloud (allowBackup="false").
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.samplatypus.boids">
+
+    <application
+        android:label="Boids"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Boids"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false"
+        android:supportsRtl="true">
+
+        <meta-data android:name="android.webkit.WebView.EnableSafeBrowsing" android:value="false" />
+        <meta-data android:name="android.webkit.WebView.MetricsOptOut" android:value="true" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

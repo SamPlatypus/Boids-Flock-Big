@@ -704,6 +704,7 @@ export function createHud(app, offline) {
     element: root,
     open: () => setOpen(true),
     close: () => setOpen(false),
+    isOpen: () => open,
     toast,
     destroy() {
       clearInterval(interval);

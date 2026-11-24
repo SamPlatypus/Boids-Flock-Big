@@ -1,0 +1,17 @@
+{
+  "package": "io.github.samplatypus.boids",
+  "versionName": "1.0",
+  "versionCode": 1,
+  "minSdk": 24,
+  "targetSdk": 34,
+  "app": {
+    "file": "dist/boids.html",
+    "sha256": "34471667dc242d19881ed55da88e429c797c81a73da18d7abfbf05e3a841bb92"
+  },
+  "apk": {
+    "bytes": 99004,
+    "sha256": "0426b079a54f8c8485d35e4838a2c589387013112338aecc960cd42ec18c9968"
+  },
+  "signer": "b7156ec9f4e5e5f5e3bdc27e8d3aa1b533b68dd9f8907bb216f1a7e8cfd199cd",
+  "permissions": []
+}

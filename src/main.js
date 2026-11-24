@@ -38,7 +38,8 @@ const app = createFlockingApp({
 window.simConfig = app.config;
 window.sim = app;
 persistSettings(app.config);
-createHud(app, startOffline());
+// Also reachable from a native wrapper (the Android app's back button closes the drawer).
+window.boidsHud = createHud(app, startOffline());
 app.start();
 
 window.addEventListener('keydown', (e) => {

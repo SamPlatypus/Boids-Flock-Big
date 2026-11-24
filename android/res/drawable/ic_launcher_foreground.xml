@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The polygons of icons/icon.svg, as an Android vector drawable. -->
+<!-- Adaptive-icon foreground: the art scaled into the 66 dp safe zone of the 108 dp layer. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="512" android:viewportHeight="512">
+    <group android:pivotX="256" android:pivotY="256" android:scaleX="0.53" android:scaleY="0.53">
+        <path android:fillColor="#5ee7ff" android:pathData="M337.7,180.6 L304.8,219.7 L306.2,205.2 L291.8,203.1 Z M389.7,166.6 L356.8,205.7 L358.2,191.2 L343.8,189.1 Z M325.7,130.6 L292.8,169.7 L294.2,155.2 L279.8,153.1 Z M375.7,220.6 L342.8,259.7 L344.2,245.2 L329.8,243.1 Z M289.7,194.6 L256.8,233.7 L258.2,219.2 L243.8,217.1 Z M423.7,210.6 L390.8,249.7 L392.2,235.2 L377.8,233.1 Z M361.7,116.6 L328.8,155.7 L330.2,141.2 L315.8,139.1 Z M311.7,242.6 L278.8,281.7 L280.2,267.2 L265.8,265.1 Z M407.7,132.6 L374.8,171.7 L376.2,157.2 L361.8,155.1 Z M275.7,148.6 L242.8,187.7 L244.2,173.2 L229.8,171.1 Z" />
+        <path android:fillColor="#ff4d5e" android:strokeColor="#ffecee" android:strokeWidth="5.0"
+            android:strokeLineJoin="round" android:pathData="M240.6,301.2 L215.0,343.1 L182.3,376.0 L166.5,437.9 L147.5,398.7 L99.1,426.4 L84.9,475.4 L73.9,431.5 L33.9,410.2 L84.9,408.3 L123.5,367.9 L90.0,340.1 L154.0,339.7 L193.8,315.9 Z" />
+    </group>
+</vector>
